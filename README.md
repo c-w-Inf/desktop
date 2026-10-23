@@ -103,7 +103,7 @@ dsk/
 image_canvas      编译出的二进制（不提交）
 src/              源代码
 assets/           UI 字体、脚本等宽字体及许可证
-third_party/      raylib、tinyfiledialogs 等第三方依赖
+third_party/      tinyfiledialogs 等第三方源码
 build/            CMake 构建目录（不提交）
 .github/          GitHub Actions
 CMakeLists.txt
@@ -161,8 +161,8 @@ pacman -S mingw-w64-ucrt-x86_64-gcc mingw-w64-ucrt-x86_64-cmake \
   mingw-w64-ucrt-x86_64-zlib
 ```
 
-仓库内的 `third_party/raylib` 是可用于本地 Linux 测试的 raylib 安装前缀；CMake 优先
-使用系统安装的 raylib。
+CMake 优先使用系统安装的 raylib；找不到时通过 CMake `FetchContent` 下载并构建
+raylib 6.2，不需要把 Linux 版 raylib 二进制放进仓库。
 
 ## 代码结构
 
@@ -461,7 +461,7 @@ Homebrew 安装依赖后执行同样的 CMake 命令。GitHub Actions 会构建 
 ## 关于 JPEG
 
 raylib 6.2 默认关闭 JPEG（和 TGA）解码，所以 Arch 官方包无法用 `LoadImage` 读取 `.jpg`。
-仓库内 `third_party/raylib` 里的 libraylib 已经用 JPEG 支持重新编译过：
+通过 `FetchContent` 或系统包构建 raylib 时，如需 JPEG 支持可显式打开：
 
 ```bash
 cmake -S raylib-6.2 -B build \

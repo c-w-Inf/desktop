@@ -11,10 +11,15 @@ pkg_check_modules(LIBUV REQUIRED IMPORTED_TARGET libuv)
 find_package(ZLIB REQUIRED)
 
 find_package(raylib CONFIG QUIET)
-if(NOT TARGET raylib AND CMAKE_SYSTEM_NAME STREQUAL "Linux")
-    find_package(raylib CONFIG QUIET
-        PATHS "${CMAKE_CURRENT_SOURCE_DIR}/third_party/raylib/lib/cmake/raylib"
-        NO_DEFAULT_PATH)
+if(NOT TARGET raylib)
+    include(FetchContent)
+    set(BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
+    set(BUILD_GAMES OFF CACHE BOOL "" FORCE)
+    FetchContent_Declare(raylib
+        GIT_REPOSITORY https://github.com/raysan5/raylib.git
+        GIT_TAG 6.2
+        GIT_SHALLOW TRUE)
+    FetchContent_MakeAvailable(raylib)
 endif()
 if(NOT TARGET raylib)
     pkg_check_modules(RAYLIB REQUIRED IMPORTED_TARGET raylib)
