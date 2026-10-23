@@ -165,7 +165,11 @@ bool NetClientConnect (const char *host, int port, const char *username) {
     clientLockedId = 0;
 
     if (!NetutilInit ()) return false;
+#if defined(__EMSCRIPTEN__)
+    NetutilAddress address = {host};
+#else
     NetutilAddress address = {host, (uint16_t)port};
+#endif
     clientConnectDone = false;
     clientConnectOk = false;
     if (!NetutilConnect (&address, &clientEvents, NULL, &clientStream))

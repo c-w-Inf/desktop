@@ -171,6 +171,7 @@ raylib 6.2，不需要把 Linux 版 raylib 二进制放进仓库。
 | `src/client.c` | 客户端联机：连接、请求、增量应用 |
 | `src/client_ui.c` / `src/client.h` | 已连接后的客户端主循环：UI、拖放、锁定 pending、加载动画和渲染 |
 | `src/main.c` | 原生入口：参数、窗口、本地服务端、连接和客户端启动 |
+| `src/main_web.c` | Web 入口：URL 参数、浏览器连接和逐帧客户端循环 |
 | `src/utils.c` / `src/utils.h` | 公共 `u64`、`IdGroup`、`TextBuffer`、`StrDup` 和随机数工具 |
 | `src/script.c` / `src/script.h` | 脚本解释器：现场解析、按 self 隔离的环境、函数支持参数并内置 `messagef`/`object`/`user`/`flip`/`size`/`assets`/`typeof`/`menu`/`rand`/`int`/`move`/`pos`/`locked`/`color`/`script`/`fork`/`untouch`/`hide`/`show`；运行时值使用 json-c，原生支持 `u64` |
 | `third_party/tinyfiledialogs.c` / `.h` | 跨平台原生文件/文件夹对话框（zlib licence） |
