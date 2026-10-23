@@ -22,6 +22,7 @@
 
 #include "assets.h"
 #include "client.h"
+#include "control.h"
 #include "entity.h"
 #include "menu.h"
 #include "net.h"
@@ -45,7 +46,8 @@ typedef struct {
     uv_process_t process;
     int port;
     bool started;
-    char stopToken[32];
+    ControlServer control;
+    char controlPath[256];
 } LocalServer;
 
 static uv_loop_t appLoop;
@@ -120,10 +122,11 @@ static bool StartLocalServer (LocalServer *local, const char *program,
     arguments[count++] = "--server";
     arguments[count++] = "--port";
     arguments[count++] = portText;
-    snprintf (local->stopToken, sizeof (local->stopToken), "%016llx",
-              (unsigned long long)(uv_hrtime () ^ ((uint64_t)port << 48)));
-    arguments[count++] = "--stop-token";
-    arguments[count++] = local->stopToken;
+    if (!ControlPath (local->controlPath, sizeof (local->controlPath), port) ||
+        !ControlServerStart (&local->control, &appLoop, local->controlPath))
+        return false;
+    arguments[count++] = "--control-pipe";
+    arguments[count++] = local->controlPath;
     if (loadPath != NULL && loadPath[0] != '\0') {
         arguments[count++] = "--load";
         arguments[count++] = (char *)loadPath;
@@ -147,13 +150,17 @@ static bool StartLocalServer (LocalServer *local, const char *program,
 
     local->process.data = local;
     int result = uv_spawn (&appLoop, &local->process, &options);
-    if (result != 0) return false;
+    if (result != 0) {
+        ControlServerStop (&local->control);
+        return false;
+    }
     local->port = port;
     local->started = true;
     return true;
 }
 
 static void StopLocalServer (LocalServer *local) {
+    ControlServerStop (&local->control);
     if (!local->started) return;
 
     for (int i = 0; i < 100 && local->started; i++) {
@@ -247,7 +254,7 @@ int main (int argc, char **argv) {
     const char *username = NULL;
     const char *loadPath = NULL;
     const char *savePath = NULL;
-    const char *stopToken = NULL;
+    const char *controlPath = NULL;
     int port = 0;
 
     for (int i = 1; i < argc; i++) {
@@ -262,8 +269,8 @@ int main (int argc, char **argv) {
             loadPath = argv[++i];
         } else if (strcmp (argv[i], "--save") == 0 && i + 1 < argc) {
             savePath = argv[++i];
-        } else if (strcmp (argv[i], "--stop-token") == 0 && i + 1 < argc) {
-            stopToken = argv[++i];
+        } else if (strcmp (argv[i], "--control-pipe") == 0 && i + 1 < argc) {
+            controlPath = argv[++i];
         } else if (host == NULL) {
             host = argv[i];
         } else if (port == 0) {
@@ -288,8 +295,11 @@ int main (int argc, char **argv) {
         AssetInit ();
         ObjectInit ();
         UserInit ();
-        NetServerSetStopToken (stopToken);
+        ControlClient control = {0};
+        if (controlPath != NULL && controlPath[0] != '\0')
+            ControlClientStart (&control, controlPath);
         int result = NetRunServer (port, "0.0.0.0", loadPath, savePath);
+        ControlClientStop (&control);
         UserUnload ();
         ObjectUnload ();
         AssetUnload ();
@@ -354,7 +364,6 @@ int main (int argc, char **argv) {
     ClientRun (&ui, &view, host == NULL, localServer.port, localAddress,
                AppLoopPump, OpenRemoteWindow, argv[0]);
 
-    if (host == NULL) NetRequestServerStop (localServer.stopToken);
     NetClientDisconnect ();
     StopLocalServer (&localServer);
     CloseAppLoop ();

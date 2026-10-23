@@ -458,7 +458,7 @@ Windows 在 MSYS2 UCRT64 中执行同样的命令，生成 `image_canvas.exe`。
 Homebrew 安装依赖后执行同样的 CMake 命令。GitHub Actions 会构建 Linux、Windows
 和 macOS，并运行无头服务端及存档冒烟测试。
 
-服务器运行在终端中，按 Ctrl+C 结束并保存；本地 GUI 关闭时通过已连接的本地会话发送带随机 token 的停止请求，服务端保存后退出。
+服务器运行在终端中，按 Ctrl+C 结束并保存；本地 GUI 通过 libuv 本地控制管道连接服务端；GUI 正常关闭或崩溃导致管道 EOF 时，服务端保存并退出。
 
 ## 关于 JPEG
 

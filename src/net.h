@@ -29,8 +29,6 @@ void NetClientDisconnect (void);
    savePath: optional save file; when NULL or empty, saving is disabled. */
 int NetRunServer (int port, const char *address, const char *loadPath,
                   const char *savePath);
-/* 本地 GUI 自动启动的服务端使用：只有携带匹配 token 的停止请求才会生效。 */
-void NetServerSetStopToken (const char *token);
 void NetServerBroadcastMessage (const char *message);
 void NetServerSendMessage (u64 target, const char *message);
 void NetServerSendError (u64 target, const char *message);
@@ -51,9 +49,6 @@ u64 NetServerAllocateEntityId (void);
 
 /* ---------- 客户端动作 ---------- */
 int NetClientUpdate (void);
-
-/* 请求本地服务端保存并停止；token 必须匹配 NetServerSetStopToken。 */
-bool NetRequestServerStop (const char *token);
 
 bool NetRequestAssetRename (u64 id, const char *name);
 bool NetRequestAssetReplace (u64 id, const char *ext,
