@@ -201,6 +201,10 @@ else()
         COMMAND ${CMAKE_COMMAND} -E copy_if_different
                 "${IMAGE_CANVAS_FALLBACK_FONT}"
                 "${CMAKE_CURRENT_SOURCE_DIR}/assets/unifont.otf")
+    add_custom_command(TARGET image_canvas POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                "$<TARGET_FILE:image_canvas>"
+                "${CMAKE_BINARY_DIR}/web/index.html")
     target_link_options(image_canvas PRIVATE
         --preload-file "${CMAKE_CURRENT_SOURCE_DIR}/assets@assets"
         -sUSE_GLFW=3
