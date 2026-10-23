@@ -71,6 +71,8 @@ endif()
 if(WIN32)
     target_compile_definitions(image_canvas PRIVATE
         WIN32_LEAN_AND_MEAN
+        NOGDI
+        NOUSER
         _CRT_SECURE_NO_WARNINGS)
     target_link_libraries(image_canvas PRIVATE
         ws2_32 iphlpapi userenv psapi comdlg32 ole32 shell32 uuid)
