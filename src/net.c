@@ -2634,26 +2634,6 @@ bool NetUnlockObjectSilent (u64 id) {
     return SendUnlockObject (id, NET_UNLOCK, true);
 }
 
-bool NetUnlockObjectAndWait (u64 id) {
-    u64 selfId = NetClientUserId ();
-    Object *object = EntityFind (id);
-    if (selfId == 0 || id == 0 || object == NULL ||
-        object->lockOwnerId != selfId)
-        return true;
-
-    if (!SendUnlockObject (id, NET_UNLOCK_NOTIFY, false)) return false;
-
-    int elapsed = 0;
-    while (elapsed < 2000) {
-        if (!NetClientConnected ()) return false;
-        object = EntityFind (id);
-        if (object == NULL || object->lockOwnerId != selfId) return true;
-
-        ClientPump (10);
-        elapsed += 10;
-    }
-    return false;
-}
 
 static bool ApplySnapshot (const unsigned char *data, size_t length) {
     Reader reader = {data, length, 0};

@@ -394,7 +394,7 @@ UI 通过 `UiEvent` 把「导入素材」「新建/重命名/删除物件」「�
 - `fork("name")` 复制当前 self 物件的素材、位置、层、环境、菜单并返回新 ID，重名使用 `name#1` 等后缀
 - 物件局部变量 `ontouch` / `ondrag` / `dragged` / `touched` 可直接赋值（不需要先 `var`），只能赋值为 null 或一元函数；`ontouch(userid)` 在玩家锁定物件时调用；`ondrag(userid)` 在物件被拖动期间按客户端同步间隔持续调用，即使鼠标静止也会触发；`dragged(userid)` 在拖动结束时调用；`touched(userid)` 在用户手动释放锁或断开连接时调用
 - `touched` 在锁真正清除前执行，此时用户数据和物件环境仍然存在；`untouch()`、服务器拒绝锁定请求、删除物件和 `remove` 清理都不会触发
-- 断开连接时服务端先对用户持有的每个物件执行 `touched`，再广播用户离开并清除用户数据
+- 断开连接时服务端先对用户当前持有的物件执行 `touched`，再广播用户离开并清除用户数据
 - `untouch()` 立即释放当前 self 物件的锁，不会触发 `touched`
 - `canscript` 为 false 时，服务端拒绝该用户的脚本提交；客户端点击脚本按钮或提交脚本时显示红色提示，但菜单脚本和物件事件仍可由服务端执行
 - 脚本 `menu("名称", func)` 向 self 对应的物件或用户菜单追加一项；self=0 写入由 entity 管理的 global 菜单；第二个参数传函数值，例如 `menu("问候", greet)`，点击时执行该函数；`menu()` 清空菜单；非用户/物件 self 报错

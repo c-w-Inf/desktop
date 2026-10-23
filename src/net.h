@@ -77,8 +77,6 @@ bool NetLockObject (u64 id);
 bool NetUnlockObject (u64 id);
 /* 内部静默释放锁；不触发 touched。 */
 bool NetUnlockObjectSilent (u64 id);
-/* 主动释放并等待服务端确认锁已清除，供关闭窗口前使用。 */
-bool NetUnlockObjectAndWait (u64 id);
 
 u64 NetClientUserId (void);
 /* 当前客户端持有的唯一物件锁；没有锁时为 0。 */

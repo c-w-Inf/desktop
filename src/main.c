@@ -268,11 +268,6 @@ static void ReleaseOwnedObjectLock (bool notify) {
     else NetUnlockObjectSilent (id);
 }
 
-static void ReleaseOwnedObjectLocksAndWait (void) {
-    u64 id = NetClientLockedObjectId ();
-    if (id != 0) NetUnlockObjectAndWait (id);
-}
-
 static void ResetClientSceneState (Object **chosen, bool *dragged,
                                     bool *dragMoved, bool *suppress,
                                     u64 *lastClickId, double *lastClickTime,
@@ -1059,7 +1054,6 @@ int main (int argc, char **argv) {
         EndDrawing ();
     }
 
-    if (NetClientConnected ()) ReleaseOwnedObjectLocksAndWait ();
     NetClientDisconnect ();
     StopLocalServer (&localServer);
     CloseAppLoop ();
