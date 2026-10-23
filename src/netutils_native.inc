@@ -1,3 +1,4 @@
+#include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -146,7 +147,8 @@ static void NetutilFlush (NetutilStream *stream) {
     if (result != 0) {
         stream->writing = false;
         BufferFree (&stream->writeData);
-        NetutilStreamClose (stream);
+        if (stream->closing) NetutilMaybeClose (stream);
+        else NetutilStreamClose (stream);
     }
 }
 
@@ -155,7 +157,8 @@ static void NetutilWriteDone (uv_write_t *request, int status) {
     stream->writing = false;
     BufferFree (&stream->writeData);
     if (status < 0) {
-        NetutilStreamClose (stream);
+        if (stream->closing) NetutilMaybeClose (stream);
+        else NetutilStreamClose (stream);
         return;
     }
     NetutilFlush (stream);
@@ -251,6 +254,9 @@ static void NetutilServerClosed (uv_handle_t *handle) {
 
 bool NetutilInit (void) {
     if (netutilInitialized) return true;
+#ifndef _WIN32
+    signal (SIGPIPE, SIG_IGN);
+#endif
     if (uv_loop_init (&netutilLoop) != 0) return false;
     if (uv_timer_init (&netutilLoop, &netutilPumpTimer) != 0) {
         uv_loop_close (&netutilLoop);

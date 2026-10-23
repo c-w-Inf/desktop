@@ -43,11 +43,8 @@ static void PrintUsage (const char *program) {
 
 typedef struct {
     uv_process_t process;
-    uv_pipe_t control;
-    uv_write_t controlWrite;
     int port;
     bool started;
-    bool controlOpen;
 } LocalServer;
 
 static uv_loop_t appLoop;
@@ -103,10 +100,6 @@ static void LocalServerExited (uv_process_t *process, int64_t status,
     LocalServer *local = process->data;
     if (local != NULL) {
         local->started = false;
-        if (local->controlOpen) {
-            uv_close ((uv_handle_t *)&local->control, NULL);
-            local->controlOpen = false;
-        }
     }
     uv_close ((uv_handle_t *)process, NULL);
 }
@@ -126,7 +119,6 @@ static bool StartLocalServer (LocalServer *local, const char *program,
     arguments[count++] = "--server";
     arguments[count++] = "--port";
     arguments[count++] = portText;
-    arguments[count++] = "--control-stdin";
     if (loadPath != NULL && loadPath[0] != '\0') {
         arguments[count++] = "--load";
         arguments[count++] = (char *)loadPath;
@@ -137,34 +129,20 @@ static bool StartLocalServer (LocalServer *local, const char *program,
     }
     arguments[count] = NULL;
 
-    if (uv_pipe_init (&appLoop, &local->control, 0) != 0) return false;
-    local->controlOpen = true;
-
-    uv_stdio_container_t stdio[3];
-    memset (stdio, 0, sizeof (stdio));
-    stdio[0].flags = UV_CREATE_PIPE | UV_READABLE_PIPE;
-    stdio[0].data.stream = (uv_stream_t *)&local->control;
-    stdio[1].flags = UV_IGNORE;
-    stdio[2].flags = UV_IGNORE;
-
     uv_process_options_t options;
     memset (&options, 0, sizeof (options));
     options.exit_cb = LocalServerExited;
     options.file = program;
     options.args = arguments;
-    options.stdio = stdio;
-    options.stdio_count = 3;
+    options.stdio = NULL;
+    options.stdio_count = 0;
 #ifdef _WIN32
     options.flags |= UV_PROCESS_WINDOWS_HIDE;
 #endif
 
     local->process.data = local;
     int result = uv_spawn (&appLoop, &local->process, &options);
-    if (result != 0) {
-        uv_close ((uv_handle_t *)&local->control, NULL);
-        local->controlOpen = false;
-        return false;
-    }
+    if (result != 0) return false;
     local->port = port;
     local->started = true;
     return true;
@@ -173,12 +151,7 @@ static bool StartLocalServer (LocalServer *local, const char *program,
 static void StopLocalServer (LocalServer *local) {
     if (!local->started) return;
 
-    static const char command[] = "stop\n";
-    if (local->controlOpen) {
-        uv_buf_t buffer = uv_buf_init ((char *)command, sizeof (command) - 1);
-        uv_write (&local->controlWrite, (uv_stream_t *)&local->control,
-                  &buffer, 1, NULL);
-    }
+    uv_process_kill (&local->process, SIGTERM);
     for (int i = 0; i < 100 && local->started; i++) {
         AppLoopPump ();
         uv_sleep (20);
@@ -189,10 +162,6 @@ static void StopLocalServer (LocalServer *local) {
             AppLoopPump ();
             uv_sleep (20);
         }
-    }
-    if (local->controlOpen) {
-        uv_close ((uv_handle_t *)&local->control, NULL);
-        local->controlOpen = false;
     }
     local->started = false;
 }
@@ -264,7 +233,6 @@ static void CloseAppLoop (void) {
 
 int main (int argc, char **argv) {
     bool serverMode = false;
-    bool controlStdin = false;
     const char *host = NULL;
     const char *username = NULL;
     const char *loadPath = NULL;
@@ -276,8 +244,6 @@ int main (int argc, char **argv) {
             serverMode = true;
         } else if (strcmp (argv[i], "--port") == 0 && i + 1 < argc) {
             port = atoi (argv[++i]);
-        } else if (strcmp (argv[i], "--control-stdin") == 0) {
-            controlStdin = true;
         } else if ((strcmp (argv[i], "--name") == 0 ||
                     strcmp (argv[i], "--username") == 0) && i + 1 < argc) {
             username = argv[++i];
@@ -309,7 +275,6 @@ int main (int argc, char **argv) {
         AssetInit ();
         ObjectInit ();
         UserInit ();
-        if (controlStdin) NetServerEnableStdinControl ();
         int result = NetRunServer (port, "0.0.0.0", loadPath, savePath);
         UserUnload ();
         ObjectUnload ();

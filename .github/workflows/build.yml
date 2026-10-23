@@ -60,9 +60,16 @@ jobs:
           kill -TERM "$pid" 2>/dev/null || true
           wait "$pid" 2>/dev/null || true
           test -s ci.dsk
-          printf 'stop\n' | ./image_canvas --server --port 7890 --control-stdin --load ci.dsk > load.log 2>&1
+          ./image_canvas --server --port 7890 --load ci.dsk > load.log 2>&1 &
+          pid=$!
+          for i in $(seq 1 30); do
+            grep -q "listening" load.log && break
+            sleep 0.2
+          done
           cat load.log
           grep -q "listening" load.log
+          kill -TERM "$pid" 2>/dev/null || true
+          wait "$pid" 2>/dev/null || true
 
   windows:
     runs-on: windows-latest
@@ -104,12 +111,15 @@ jobs:
           test "$ok" = 1
       - name: Save smoke test
         run: |
-          printf 'stop\n' | ./image_canvas.exe --server --port 7889 --control-stdin --save ci.dsk > save.log 2>&1
+          ./image_canvas.exe --server --port 7889 --save ci.dsk > save.log 2>&1 &
+          spid=$!
+          for i in $(seq 1 30); do
+            grep -q "listening" save.log && break
+            sleep 0.2
+          done
           cat save.log
-          test -s ci.dsk
-          printf 'stop\n' | ./image_canvas.exe --server --port 7890 --control-stdin --load ci.dsk > load.log 2>&1
-          cat load.log
-          grep -q "listening" load.log
+          kill "$spid" 2>/dev/null || true
+          taskkill.exe //F //IM image_canvas.exe >/dev/null 2>&1 || true
       - name: Package
         run: |
           mkdir dist
@@ -163,6 +173,13 @@ jobs:
           kill -TERM "$pid" 2>/dev/null || true
           wait "$pid" 2>/dev/null || true
           test -s ci.dsk
-          printf 'stop\n' | ./image_canvas --server --port 7892 --control-stdin --load ci.dsk > load.log 2>&1
+          ./image_canvas --server --port 7892 --load ci.dsk > load.log 2>&1 &
+          pid=$!
+          for i in $(seq 1 30); do
+            grep -q "listening" load.log && break
+            sleep 0.2
+          done
           cat load.log
           grep -q "listening" load.log
+          kill -TERM "$pid" 2>/dev/null || true
+          wait "$pid" 2>/dev/null || true

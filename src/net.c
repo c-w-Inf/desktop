@@ -1,8 +1,11 @@
 #define _GNU_SOURCE
 
 #include "net.h"
+#include "netutils.h"
 #include "ui.h"
+#include "utils.h"
 
+#include <errno.h>
 #include <limits.h>
 #include <signal.h>
 #include <stdint.h>
@@ -10,8 +13,6 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
-
-#include <uv.h>
 
 #include "assets.h"
 #include "menu.h"
@@ -494,14 +495,11 @@ static bool FrameObjectLock (Buffer *frame, uint8_t type, u64 id) {
 }
 
 typedef struct {
-    uv_tcp_t handle;
-    uv_write_t writeRequest;
+    NetutilStream *stream;
     Buffer in;
-    Buffer out;
-    Buffer writeData;
     bool active;
-    bool writing;
     bool closing;
+    bool closeSent;
     bool joined;
     bool inputClosed;
     bool disconnectQueued;
@@ -513,41 +511,21 @@ typedef struct {
 static ServerClient serverClients[NET_MAX_CLIENTS];
 static ScriptEnv *serverScriptEnv;
 static char serverSavePath[1024];
-static volatile sig_atomic_t serverStopRequested;
 static int pendingLockClient = -1;
 static u64 pendingLockObjectId;
 static bool pendingLockFailureSent;
-static uv_loop_t *serverLoop;
-static uv_timer_t serverTimer;
-static uv_signal_t serverSignals[3];
-static int serverSignalCount;
-static uv_pipe_t serverControl;
-static bool serverControlEnabled;
-static bool serverControlOpen;
 
-static void ServerStopSignal (uv_signal_t *handle, int number) {
-    (void)handle;
-    (void)number;
-    serverStopRequested = 1;
-}
-
-static void ServerInstallStopHandlers (void) {
-    uv_signal_init (serverLoop, &serverSignals[serverSignalCount]);
-    uv_signal_start (&serverSignals[serverSignalCount], ServerStopSignal, SIGINT);
-    serverSignalCount++;
-#ifndef _WIN32
-    uv_signal_init (serverLoop, &serverSignals[serverSignalCount]);
-    uv_signal_start (&serverSignals[serverSignalCount], ServerStopSignal, SIGTERM);
-    serverSignalCount++;
-    uv_signal_init (serverLoop, &serverSignals[serverSignalCount]);
-    uv_signal_start (&serverSignals[serverSignalCount], ServerStopSignal, SIGHUP);
-    serverSignalCount++;
-#else
-    uv_signal_init (serverLoop, &serverSignals[serverSignalCount]);
-    uv_signal_start (&serverSignals[serverSignalCount], ServerStopSignal, SIGBREAK);
-    serverSignalCount++;
-#endif
-}
+static void ServerBeginDisconnect (ServerClient *client);
+static void ServerClientMaybeClose (ServerClient *client);
+static void ServerReadFrames (ServerClient *client, int clientIndex);
+static void ServerQueueDisconnect (int clientIndex);
+static void ServerProcessRequests (void);
+static void ServerClientData (NetutilStream *stream, const unsigned char *data,
+                              size_t size, void *user);
+static void ServerClientOnClosed (NetutilStream *stream, void *user);
+static const NetutilEvents serverClientEvents = {
+    NULL, ServerClientData, ServerClientOnClosed, NULL
+};
 
 static void ServerSave (void) {
     if (serverScriptEnv == NULL || serverSavePath[0] == '\0') return;
@@ -641,61 +619,20 @@ static bool ServerBuildSnapshot (Buffer *frame, u64 selfId) {
 }
 
 
-static void ServerClientWriteDone (uv_write_t *request, int status);
-static void ServerClientClosed (uv_handle_t *handle);
-static void ServerBeginDisconnect (ServerClient *client);
-
-static void ServerClientFlush (ServerClient *client) {
-    if (!client->active || client->writing || client->out.len == 0 ||
-        uv_is_closing ((uv_handle_t *)&client->handle))
-        return;
-
-    client->writeData = client->out;
-    memset (&client->out, 0, sizeof (client->out));
-    client->writeRequest.data = client;
-    client->writing = true;
-
-    uv_buf_t buffer = uv_buf_init ((char *)client->writeData.data,
-                                   (unsigned int)client->writeData.len);
-    int result = uv_write (&client->writeRequest,
-                           (uv_stream_t *)&client->handle, &buffer, 1,
-                           ServerClientWriteDone);
-    if (result != 0) {
-        client->writing = false;
-        BufferFree (&client->writeData);
-        client->closing = true;
-    }
-}
-
 static void ServerClientMaybeClose (ServerClient *client) {
-    if (!client->active || !client->closing) return;
-    ServerClientFlush (client);
-    if (client->writing || client->out.len > 0) return;
-    if (uv_is_closing ((uv_handle_t *)&client->handle)) return;
-
-    uv_read_stop ((uv_stream_t *)&client->handle);
-    BufferFree (&client->in);
-    BufferFree (&client->out);
-    BufferFree (&client->writeData);
-    uv_close ((uv_handle_t *)&client->handle, ServerClientClosed);
+    if (!client->active || !client->closing || client->closeSent) return;
+    client->closeSent = true;
+    NetutilClose (client->stream);
 }
 
-static void ServerClientWriteDone (uv_write_t *request, int status) {
-    ServerClient *client = request->data;
-    client->writing = false;
-    BufferFree (&client->writeData);
-    if (status < 0 && !client->closing) {
-        if (client->joined) ServerBeginDisconnect (client);
-        else client->closing = true;
-    }
-    if (!client->closing) ServerClientFlush (client);
-    ServerClientMaybeClose (client);
-}
-
-static void ServerClientClosed (uv_handle_t *handle) {
-    ServerClient *client = handle->data;
+static void ServerClientOnClosed (NetutilStream *stream, void *user) {
+    (void)stream;
+    ServerClient *client = user;
+    if (client->joined) ServerBeginDisconnect (client);
+    client->stream = NULL;
     client->active = false;
     client->closing = false;
+    client->closeSent = false;
     client->joined = false;
     client->inputClosed = false;
     client->disconnectQueued = false;
@@ -703,20 +640,32 @@ static void ServerClientClosed (uv_handle_t *handle) {
     client->userId = 0;
     client->username[0] = '\0';
     BufferFree (&client->in);
-    BufferFree (&client->out);
-    BufferFree (&client->writeData);
 }
 
-static void ServerClientEnqueue (ServerClient *client, const unsigned char *data, size_t size) {
-    if (!client->active || uv_is_closing ((uv_handle_t *)&client->handle))
-        return;
-    if (client->out.len + size > NET_MAX_OUTPUT ||
-        !BufferAppend (&client->out, data, size)) {
+static void ServerClientEnqueue (ServerClient *client, const unsigned char *data,
+                                 size_t size) {
+    if (!client->active || client->closing || client->stream == NULL) return;
+    if (size > NET_MAX_OUTPUT || !NetutilWrite (client->stream, data, size)) {
         client->closing = true;
-    } else {
-        ServerClientFlush (client);
+        ServerClientMaybeClose (client);
     }
-    ServerClientMaybeClose (client);
+}
+
+static void ServerClientData (NetutilStream *stream, const unsigned char *data,
+                              size_t size, void *user) {
+    (void)stream;
+    ServerClient *client = user;
+    int clientIndex = (int)(client - serverClients);
+    if (!client->active || client->inputClosed) return;
+    if (client->in.len + size > NET_MAX_FRAME + 4 ||
+        !BufferAppend (&client->in, data, size)) {
+        client->inputClosed = true;
+    } else {
+        ServerReadFrames (client, clientIndex);
+    }
+    if (client->inputClosed && !client->disconnectQueued)
+        ServerQueueDisconnect (clientIndex);
+    ServerProcessRequests ();
 }
 
 static bool ServerQueuePush (int clientIndex, uint8_t type,
@@ -748,7 +697,6 @@ static void ServerCloseInput (int clientIndex) {
     ServerClient *client = &serverClients[clientIndex];
     if (!client->active) return;
     client->inputClosed = true;
-    uv_read_stop ((uv_stream_t *)&client->handle);
 }
 
 static void ServerQueueDisconnect (int clientIndex) {
@@ -1730,194 +1678,60 @@ static void ServerProcessRequests (void) {
 }
 
 static time_t serverLastSave;
-static uv_tcp_t serverListener;
+static NetutilServer *serverListener;
 
-static void NetAllocBuffer (uv_handle_t *handle, size_t suggested,
-                               uv_buf_t *buffer) {
-    (void)handle;
-    if (suggested > 65536) suggested = 65536;
-    buffer->base = malloc (suggested);
-    buffer->len = buffer->base != NULL ? suggested : 0;
-}
-
-static void ServerClientRead (uv_stream_t *stream, ssize_t nread,
-                              const uv_buf_t *buffer) {
-    ServerClient *client = stream->data;
-    int clientIndex = (int)(client - serverClients);
-    if (nread < 0) {
-        free (buffer->base);
-        ServerCloseInput (clientIndex);
-        ServerQueueDisconnect (clientIndex);
-        ServerProcessRequests ();
-        return;
-    }
-    if (nread == 0) {
-        free (buffer->base);
-        return;
-    }
-    if (client->in.len + (size_t)nread > NET_MAX_FRAME + 4 ||
-        !BufferAppend (&client->in, buffer->base, (size_t)nread)) {
-        free (buffer->base);
-        ServerCloseInput (clientIndex);
-        ServerQueueDisconnect (clientIndex);
-        ServerProcessRequests ();
-        return;
-    }
-    free (buffer->base);
-    ServerReadFrames (client, clientIndex);
-    if (client->inputClosed && !client->disconnectQueued)
-        ServerQueueDisconnect (clientIndex);
-    ServerProcessRequests ();
-}
-
-static void ServerClientAccepted (uv_stream_t *server, int status) {
+static void ServerClientAccepted (NetutilServer *server, NetutilStream *stream,
+                                  void *user) {
     (void)server;
-    if (status < 0) return;
-
+    (void)user;
     int slot = -1;
     for (int i = 0; i < NET_MAX_CLIENTS; i++) {
-        if (!serverClients[i].active) {
-            slot = i;
-            break;
-        }
+        if (!serverClients[i].active) { slot = i; break; }
     }
     if (slot < 0) {
-        uv_tcp_t rejected;
-        uv_tcp_init (serverLoop, &rejected);
-        if (uv_accept ((uv_stream_t *)&serverListener,
-                       (uv_stream_t *)&rejected) == 0)
-            uv_close ((uv_handle_t *)&rejected, NULL);
+        NetutilClose (stream);
         return;
     }
 
     ServerClient *client = &serverClients[slot];
-    uv_tcp_init (serverLoop, &client->handle);
-    client->handle.data = client;
+    memset (client, 0, sizeof (*client));
+    client->stream = stream;
     client->active = true;
-    client->closing = false;
-    client->joined = false;
-    client->inputClosed = false;
-    client->disconnectQueued = false;
-    client->helloQueued = false;
-    client->userId = 0;
-    client->username[0] = '\0';
-    memset (&client->in, 0, sizeof (client->in));
-    memset (&client->out, 0, sizeof (client->out));
-    memset (&client->writeData, 0, sizeof (client->writeData));
-    client->writing = false;
-
-    if (uv_accept ((uv_stream_t *)&serverListener,
-                   (uv_stream_t *)&client->handle) != 0 ||
-        uv_read_start ((uv_stream_t *)&client->handle, NetAllocBuffer,
-                       ServerClientRead) != 0) {
-        client->closing = true;
-        ServerClientMaybeClose (client);
-        return;
-    }
+    NetutilSetEvents (stream, &serverClientEvents, client);
     printf ("client connected\n");
     fflush (stdout);
 }
 
-void NetServerEnableStdinControl (void) {
-    serverControlEnabled = true;
-}
-
-static void ServerControlBuffer (uv_handle_t *handle, size_t suggested,
-                                 uv_buf_t *buffer) {
-    (void)handle;
-    if (suggested > 4096) suggested = 4096;
-    buffer->base = malloc (suggested);
-    buffer->len = buffer->base != NULL ? suggested : 0;
-}
-
-static void ServerControlRead (uv_stream_t *stream, ssize_t nread,
-                               const uv_buf_t *buffer) {
-    (void)stream;
-    if (nread > 0 && buffer->base != NULL) {
-        size_t length = (size_t)nread;
-        for (size_t i = 0; i + 4 <= length; i++) {
-            if (memcmp (buffer->base + i, "stop", 4) == 0) {
-                serverStopRequested = 1;
-                break;
-            }
-        }
-    }
-    free (buffer->base);
-}
-
-static void ServerTimerTick (uv_timer_t *timer) {
-    (void)timer;
-    if (serverStopRequested) {
-        uv_stop (serverLoop);
-        return;
-    }
-    time_t now = time (NULL);
-    if (now - serverLastSave >= SAVE_INTERVAL_SECONDS) {
-        serverLastSave = now;
-        ServerSave ();
-    }
-}
-
 static void ServerClientForceClose (ServerClient *client) {
-    if (!client->active || uv_is_closing ((uv_handle_t *)&client->handle)) return;
+    if (!client->active) return;
     client->closing = true;
-    uv_read_stop ((uv_stream_t *)&client->handle);
-    uv_close ((uv_handle_t *)&client->handle, ServerClientClosed);
+    ServerClientMaybeClose (client);
 }
 
 int NetRunServer (int port, const char *bindAddress,
                   const char *loadPath, const char *savePath) {
-    uv_loop_t loop;
-    if (uv_loop_init (&loop) != 0) return 1;
-    serverLoop = &loop;
-    serverStopRequested = 0;
+    if (!NetutilInit ()) return 1;
     serverLastSave = time (NULL);
-    serverSignalCount = 0;
     serverSavePath[0] = '\0';
     if (savePath != NULL && savePath[0] != '\0')
         snprintf (serverSavePath, sizeof (serverSavePath), "%s", savePath);
+    for (int i = 0; i < NET_MAX_CLIENTS; i++)
+        memset (&serverClients[i], 0, sizeof (serverClients[i]));
 
-    for (int i = 0; i < NET_MAX_CLIENTS; i++) {
-        serverClients[i].active = false;
-        serverClients[i].closing = false;
-    }
-    if (uv_tcp_init (&loop, &serverListener) != 0) {
-        uv_loop_close (&loop);
-        serverLoop = NULL;
-        return 1;
-    }
-
-    struct sockaddr_in address;
     const char *bind = bindAddress != NULL && bindAddress[0] != '\0'
                            ? bindAddress : "0.0.0.0";
-    int addressResult = uv_ip4_addr (bind, port, &address);
-    if (addressResult != 0) {
-        fprintf (stderr, "无效的绑定地址: %s (%s)\n", bind,
-                 uv_strerror (addressResult));
-        uv_close ((uv_handle_t *)&serverListener, NULL);
-        uv_run (&loop, UV_RUN_DEFAULT);
-        uv_loop_close (&loop);
-        serverLoop = NULL;
-        return 1;
-    }
-    if (uv_tcp_bind (&serverListener, (const struct sockaddr *)&address, 0) != 0 ||
-        uv_listen ((uv_stream_t *)&serverListener, NET_MAX_CLIENTS,
-                   ServerClientAccepted) != 0) {
+    if (!NetutilListen (bind, (uint16_t)port, ServerClientAccepted, NULL,
+                        &serverListener)) {
         fprintf (stderr, "无法监听端口 %d\n", port);
-        uv_close ((uv_handle_t *)&serverListener, NULL);
-        uv_run (&loop, UV_RUN_DEFAULT);
-        uv_loop_close (&loop);
-        serverLoop = NULL;
+        NetutilShutdown ();
         return 1;
     }
 
     serverScriptEnv = ScriptEnvCreate ();
     if (serverScriptEnv == NULL) {
         fprintf (stderr, "创建脚本环境失败\n");
-        uv_close ((uv_handle_t *)&serverListener, NULL);
-        uv_run (&loop, UV_RUN_DEFAULT);
-        uv_loop_close (&loop);
-        serverLoop = NULL;
+        NetutilServerClose (serverListener);
+        NetutilShutdown ();
         return 1;
     }
     if (loadPath != NULL && loadPath[0] != '\0') {
@@ -1926,64 +1740,43 @@ int NetRunServer (int port, const char *bindAddress,
             fprintf (stderr, "导入存档失败: %s\n", loadPath);
             ScriptEnvDestroy (serverScriptEnv);
             serverScriptEnv = NULL;
-            uv_close ((uv_handle_t *)&serverListener, NULL);
-            uv_run (&loop, UV_RUN_DEFAULT);
-            uv_loop_close (&loop);
-            serverLoop = NULL;
+            NetutilServerClose (serverListener);
+            NetutilShutdown ();
             return 1;
         }
         ServerSetNextEntityId (nextId);
     }
 
-    ServerInstallStopHandlers ();
-    uv_timer_init (&loop, &serverTimer);
-    uv_timer_start (&serverTimer, ServerTimerTick, 500, 500);
-    if (serverControlEnabled) {
-        uv_pipe_init (&loop, &serverControl, 0);
-        if (uv_pipe_open (&serverControl, 0) == 0 &&
-            uv_read_start ((uv_stream_t *)&serverControl, ServerControlBuffer,
-                           ServerControlRead) == 0) {
-            serverControlOpen = true;
-        }
-    }
+    UtilsInstallStopHandlers ();
     printf ("Image Canvas server listening on port %d\n", port);
     fflush (stdout);
-    uv_run (&loop, UV_RUN_DEFAULT);
+    while (!UtilsStopRequested ()) {
+        NetutilPump (500);
+        time_t now = time (NULL);
+        if (now - serverLastSave >= SAVE_INTERVAL_SECONDS) {
+            serverLastSave = now;
+            ServerSave ();
+        }
+    }
 
     ServerSave ();
-    uv_close ((uv_handle_t *)&serverTimer, NULL);
-    for (int i = 0; i < serverSignalCount; i++)
-        uv_close ((uv_handle_t *)&serverSignals[i], NULL);
-    uv_close ((uv_handle_t *)&serverListener, NULL);
-    if (serverControlOpen) {
-        uv_close ((uv_handle_t *)&serverControl, NULL);
-        serverControlOpen = false;
-    }
+    NetutilServerClose (serverListener);
     for (int i = 0; i < NET_MAX_CLIENTS; i++)
         ServerClientForceClose (&serverClients[i]);
-    uv_run (&loop, UV_RUN_DEFAULT);
-    uv_loop_close (&loop);
-    serverLoop = NULL;
+    NetutilShutdown ();
+    serverListener = NULL;
 
     if (serverScriptEnv != NULL) ScriptEnvDestroy (serverScriptEnv);
     serverScriptEnv = NULL;
     return 0;
 }
 
-static uv_loop_t clientLoop;
-static bool clientLoopInitialized;
-static uv_tcp_t clientHandle;
-static uv_connect_t clientConnectRequest;
-static bool clientHandleInitialized;
+static NetutilStream *clientStream;
 static bool clientActive;
 static bool clientClosing;
 static bool clientConnectDone;
 static bool clientConnectOk;
 static Buffer clientIn;
-static Buffer clientOut;
-static Buffer clientWriteData;
-static uv_write_t clientWriteRequest;
-static bool clientWriting;
 static int clientPendingFlags;
 static u64 nextRequestId = 1;
 static u64 objectRequestId;
@@ -1999,41 +1792,37 @@ static u64 clientSceneVersion;
 
 static bool ParseClientFrames (int *flags);
 static void ClientCloseNow (void);
-static void ClientFlush (void);
-static void ClientOnWriteDone (uv_write_t *request, int status);
-static void ClientOnClosed (uv_handle_t *handle);
+static void ClientOnConnected (NetutilStream *stream, void *user);
+static void ClientOnRead (NetutilStream *stream, const unsigned char *data,
+                          size_t size, void *user);
+static void ClientOnClosed (NetutilStream *stream, void *user);
+
+static const NetutilEvents clientEvents = {
+    ClientOnConnected, ClientOnRead, ClientOnClosed, NULL
+};
 
 static void ClientPump (int milliseconds) {
-    int elapsed = 0;
-    do {
-        if (!clientLoopInitialized) return;
-        uv_run (&clientLoop, UV_RUN_NOWAIT);
-        if (milliseconds <= 0) break;
-        uv_sleep (1);
-        elapsed++;
-    } while (elapsed < milliseconds);
+    NetutilPump (milliseconds);
 }
 
-static void ClientOnRead (uv_stream_t *stream, ssize_t nread,
-                          const uv_buf_t *buffer) {
+static void ClientOnConnected (NetutilStream *stream, void *user) {
     (void)stream;
-    if (nread < 0) {
-        free (buffer->base);
-        ClientCloseNow ();
-        return;
-    }
-    if (nread == 0) {
-        free (buffer->base);
-        return;
-    }
-    if (clientIn.len + (size_t)nread > NET_MAX_FRAME + 4 ||
-        !BufferAppend (&clientIn, buffer->base, (size_t)nread)) {
-        free (buffer->base);
-        ClientCloseNow ();
-        return;
-    }
-    free (buffer->base);
+    (void)user;
+    clientConnectDone = true;
+    clientConnectOk = true;
+    clientActive = true;
+    clientClosing = false;
+}
 
+static void ClientOnRead (NetutilStream *stream, const unsigned char *data,
+                          size_t size, void *user) {
+    (void)stream;
+    (void)user;
+    if (clientIn.len + size > NET_MAX_FRAME + 4 ||
+        !BufferAppend (&clientIn, data, size)) {
+        ClientCloseNow ();
+        return;
+    }
     int flags = NET_UPDATE_NONE;
     if (!ParseClientFrames (&flags)) {
         ClientCloseNow ();
@@ -2043,23 +1832,14 @@ static void ClientOnRead (uv_stream_t *stream, ssize_t nread,
     if (flags & NET_UPDATE_REJECTED) ClientCloseNow ();
 }
 
-
-static void ClientOnWriteDone (uv_write_t *request, int status) {
-    (void)request;
-    clientWriting = false;
-    BufferFree (&clientWriteData);
-    if (status < 0) {
-        ClientCloseNow ();
-        return;
-    }
-    ClientFlush ();
-}
-
-static void ClientOnClosed (uv_handle_t *handle) {
-    (void)handle;
-    clientHandleInitialized = false;
+static void ClientOnClosed (NetutilStream *stream, void *user) {
+    (void)stream;
+    (void)user;
+    clientStream = NULL;
     clientActive = false;
     clientClosing = false;
+    clientConnectDone = true;
+    clientConnectOk = false;
     clientUserId = 0;
     clientLockedId = 0;
     pendingLockId = 0;
@@ -2067,40 +1847,16 @@ static void ClientOnClosed (uv_handle_t *handle) {
     lockDone = NULL;
     lockResult = 0;
     BufferFree (&clientIn);
-    BufferFree (&clientOut);
-    BufferFree (&clientWriteData);
-}
-
-static void ClientFlush (void) {
-    if (!clientActive || clientClosing || clientWriting || clientOut.len == 0)
-        return;
-
-    clientWriteData = clientOut;
-    memset (&clientOut, 0, sizeof (clientOut));
-    clientWriteRequest.data = NULL;
-    clientWriting = true;
-    uv_buf_t buffer = uv_buf_init ((char *)clientWriteData.data,
-                                   (unsigned int)clientWriteData.len);
-    int result = uv_write (&clientWriteRequest, (uv_stream_t *)&clientHandle,
-                           &buffer, 1, ClientOnWriteDone);
-    if (result != 0) {
-        clientWriting = false;
-        BufferFree (&clientWriteData);
-        ClientCloseNow ();
-    }
 }
 
 static void ClientCloseNow (void) {
-    if (clientHandleInitialized && !uv_is_closing ((uv_handle_t *)&clientHandle)) {
+    if (clientStream != NULL) {
         clientClosing = true;
-        uv_read_stop ((uv_stream_t *)&clientHandle);
-        uv_close ((uv_handle_t *)&clientHandle, ClientOnClosed);
-    } else if (!clientHandleInitialized) {
+        NetutilClose (clientStream);
+    } else {
         clientActive = false;
         clientClosing = false;
         BufferFree (&clientIn);
-        BufferFree (&clientOut);
-        BufferFree (&clientWriteData);
     }
     clientUserId = 0;
     pendingLockId = 0;
@@ -2110,11 +1866,9 @@ static void ClientCloseNow (void) {
 }
 
 static void ClientWaitClosed (int milliseconds) {
-    for (int elapsed = 0; elapsed < milliseconds && clientHandleInitialized;
-         elapsed++) {
-        uv_run (&clientLoop, UV_RUN_NOWAIT);
-        uv_sleep (1);
-    }
+    for (int elapsed = 0; elapsed < milliseconds && clientStream != NULL;
+         elapsed++)
+        NetutilPump (1);
 }
 
 u64 NetClientUserId (void) {
@@ -2138,86 +1892,39 @@ u64 NetClientSceneVersion (void) {
 }
 
 static bool ClientSendFrame (Buffer *frame) {
-    if (!clientActive || clientClosing || clientOut.len + frame->len > NET_MAX_OUTPUT) {
+    if (!clientActive || clientClosing || clientStream == NULL ||
+        frame->len > NET_MAX_OUTPUT) {
         BufferFree (frame);
         return false;
     }
-    bool ok = BufferAppend (&clientOut, frame->data, frame->len);
+    bool ok = NetutilWrite (clientStream, frame->data, frame->len);
     BufferFree (frame);
-    if (ok) ClientFlush ();
     return ok;
-}
-
-typedef struct {
-    bool done;
-    bool ok;
-    struct sockaddr_in address;
-} ClientResolve;
-
-static void ClientResolved (uv_getaddrinfo_t *request, int status,
-                            struct addrinfo *result) {
-    ClientResolve *resolve = request->data;
-    resolve->done = true;
-    resolve->ok = status == 0 && result != NULL &&
-                  result->ai_family == AF_INET &&
-                  result->ai_addrlen >= sizeof (struct sockaddr_in);
-    if (resolve->ok)
-        memcpy (&resolve->address, result->ai_addr, sizeof (resolve->address));
-    if (result != NULL) uv_freeaddrinfo (result);
-}
-
-static void ClientConnected (uv_connect_t *request, int status) {
-    (void)request;
-    clientConnectDone = true;
-    clientConnectOk = status == 0;
 }
 
 bool NetClientConnect (const char *host, int port, const char *username) {
     if (username == NULL || username[0] == '\0') return false;
     ClientCloseNow ();
     ClientWaitClosed (1000);
-    if (clientHandleInitialized) return false;
+    if (clientStream != NULL) return false;
     UserUnload ();
     clientPendingFlags = NET_UPDATE_NONE;
     nextRequestId = 1;
     objectRequestId = 0;
     pendingLockId = 0;
+    clientUserId = 0;
+    clientLockedId = 0;
 
-    if (!clientLoopInitialized) {
-        if (uv_loop_init (&clientLoop) != 0) return false;
-        clientLoopInitialized = true;
-    }
-
-    struct addrinfo hints;
-    memset (&hints, 0, sizeof (hints));
-    hints.ai_family = AF_INET;
-    hints.ai_socktype = SOCK_STREAM;
-    hints.ai_protocol = IPPROTO_TCP;
-
-    ClientResolve resolve;
-    memset (&resolve, 0, sizeof (resolve));
-    uv_getaddrinfo_t resolveRequest;
-    resolveRequest.data = &resolve;
-    if (uv_getaddrinfo (&clientLoop, &resolveRequest, ClientResolved, host,
-                        NULL, &hints) != 0)
-        return false;
-    while (!resolve.done) uv_run (&clientLoop, UV_RUN_ONCE);
-    if (!resolve.ok) return false;
-    resolve.address.sin_port = htons ((uint16_t)port);
-
-    if (uv_tcp_init (&clientLoop, &clientHandle) != 0) return false;
-    clientHandleInitialized = true;
+    if (!NetutilInit ()) return false;
+    NetutilAddress address = {host, (uint16_t)port};
     clientConnectDone = false;
     clientConnectOk = false;
-    if (uv_tcp_connect (&clientConnectRequest, &clientHandle,
-                        (const struct sockaddr *)&resolve.address,
-                        ClientConnected) != 0) {
-        ClientCloseNow ();
-        ClientWaitClosed (1000);
+    if (!NetutilConnect (&address, &clientEvents, NULL, &clientStream))
         return false;
-    }
-    while (!clientConnectDone) uv_run (&clientLoop, UV_RUN_ONCE);
-    if (!clientConnectOk) {
+
+    for (int elapsed = 0; !clientConnectDone && elapsed < 5000; elapsed++)
+        NetutilPump (1);
+    if (!clientConnectDone || !clientConnectOk) {
         ClientCloseNow ();
         ClientWaitClosed (1000);
         return false;
@@ -2225,14 +1932,6 @@ bool NetClientConnect (const char *host, int port, const char *username) {
 
     clientActive = true;
     clientClosing = false;
-    clientUserId = 0;
-    if (uv_read_start ((uv_stream_t *)&clientHandle, NetAllocBuffer,
-                       ClientOnRead) != 0) {
-        ClientCloseNow ();
-        ClientWaitClosed (1000);
-        return false;
-    }
-
     Buffer payload = {0};
     Buffer frame = {0};
     bool ok = BufferPutString (&payload, username) &&
@@ -2247,12 +1946,13 @@ bool NetClientConnect (const char *host, int port, const char *username) {
 }
 
 bool NetClientConnected (void) {
-    return clientHandleInitialized && clientActive && !clientClosing;
+    return clientStream != NULL && clientActive && !clientClosing;
 }
 
 void NetClientDisconnect (void) {
     ClientCloseNow ();
 }
+
 bool NetRequestObjectCreate (Vector2 center, NetLockDoneFn done) {
     if (clientLockedId != 0) NetUnlockObject (clientLockedId);
     u64 requestId = nextRequestId++;
@@ -3201,7 +2901,7 @@ static bool ParseClientFrames (int *flags) {
 }
 
 int NetClientUpdate (void) {
-    if (clientLoopInitialized) ClientPump (0);
+    ClientPump (0);
 
     if (lockDone != NULL) {
         bool timeout = lockTimeout > 0.0 &&

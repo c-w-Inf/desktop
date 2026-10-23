@@ -29,8 +29,6 @@ void NetClientDisconnect (void);
    savePath: optional save file; when NULL or empty, saving is disabled. */
 int NetRunServer (int port, const char *address, const char *loadPath,
                   const char *savePath);
-/* 本地 GUI 启动的子服务端通过 stdin 接收 stop 命令。 */
-void NetServerEnableStdinControl (void);
 void NetServerBroadcastMessage (const char *message);
 void NetServerSendMessage (u64 target, const char *message);
 void NetServerSendError (u64 target, const char *message);
