@@ -118,20 +118,28 @@ jobs:
             grep -q "listening" save.log && break
             sleep 0.2
           done
-          python - <<'PY'
-          import socket, struct
+          /usr/bin/python3 - <<'PY'
+          import socket, struct, time
           s = socket.create_connection(("127.0.0.1", 7889), 3)
           def frame(t, payload=b""):
               return struct.pack("<I", len(payload) + 1) + bytes([t]) + payload
           name = b"ci"
           s.sendall(frame(8, struct.pack("<H", len(name)) + name))
+          s.settimeout(3)
+          size = struct.unpack("<I", s.recv(4))[0]
+          while size:
+              size -= len(s.recv(size))
           token = b"ci-stop"
           s.sendall(frame(36, struct.pack("<H", len(token)) + token))
           s.close()
           PY
-          wait "$spid"
+          for i in $(seq 1 100); do
+            kill -0 "$spid" 2>/dev/null || break
+            sleep 0.1
+          done
           cat save.log
           test -s ci.dsk
+          taskkill.exe //F //IM image_canvas.exe >/dev/null 2>&1 || true
       - name: Package
         run: |
           mkdir dist
