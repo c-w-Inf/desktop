@@ -53,6 +53,7 @@
 #define NET_DRAG_UPDATE 33
 #define NET_UNLOCK_NOTIFY 34
 #define NET_REQ_ASSET_OBJECT 35
+#define NET_REQ_STOP 36
 #define NET_CURSOR 14
 #define NET_LOCK 15
 #define NET_UNLOCK 16
@@ -514,6 +515,13 @@ static char serverSavePath[1024];
 static int pendingLockClient = -1;
 static u64 pendingLockObjectId;
 static bool pendingLockFailureSent;
+static char serverStopToken[65];
+static bool serverStopRequested;
+
+void NetServerSetStopToken (const char *token) {
+    snprintf (serverStopToken, sizeof (serverStopToken), "%s",
+              token != NULL ? token : "");
+}
 
 static void ServerBeginDisconnect (ServerClient *client);
 static void ServerClientMaybeClose (ServerClient *client);
@@ -1596,6 +1604,17 @@ static bool ServerApplyFrame (uint8_t type, const unsigned char *data, size_t le
         case NET_UNLOCK_NOTIFY:
             ok = ServerApplyLock (&reader, clientIndex, true, true);
             break;
+        case NET_REQ_STOP: {
+            char token[65];
+            if (!ReaderString (&reader, token, sizeof (token)) ||
+                reader.pos != reader.len)
+                return false;
+            if (serverStopToken[0] != '\0' &&
+                strcmp (token, serverStopToken) == 0)
+                serverStopRequested = true;
+            ok = true;
+            break;
+        }
         default:
             return false;
     }
@@ -1750,7 +1769,8 @@ int NetRunServer (int port, const char *bindAddress,
     UtilsInstallStopHandlers ();
     printf ("Image Canvas server listening on port %d\n", port);
     fflush (stdout);
-    while (!UtilsStopRequested ()) {
+    serverStopRequested = false;
+    while (!UtilsStopRequested () && !serverStopRequested) {
         NetutilPump (500);
         time_t now = time (NULL);
         if (now - serverLastSave >= SAVE_INTERVAL_SECONDS) {
@@ -1987,6 +2007,21 @@ bool NetRequestObjectCreate (Vector2 center, NetLockDoneFn done) {
         return false;
     }
     return true;
+}
+
+bool NetRequestServerStop (const char *token) {
+    if (token == NULL || token[0] == '\0' || strlen (token) > 0xFFFFu)
+        return false;
+    Buffer payload = {0};
+    Buffer frame = {0};
+    bool ok = BufferPutString (&payload, token) &&
+              FrameMake (&frame, NET_REQ_STOP, &payload);
+    BufferFree (&payload);
+    if (!ok) {
+        BufferFree (&frame);
+        return false;
+    }
+    return ClientSendFrame (&frame);
 }
 
 bool NetRequestAssetRename (u64 id, const char *name) {

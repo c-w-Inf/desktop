@@ -45,6 +45,7 @@ typedef struct {
     uv_process_t process;
     int port;
     bool started;
+    char stopToken[32];
 } LocalServer;
 
 static uv_loop_t appLoop;
@@ -113,12 +114,16 @@ static bool StartLocalServer (LocalServer *local, const char *program,
 
     char portText[16];
     snprintf (portText, sizeof (portText), "%d", port);
-    char *arguments[12];
+    char *arguments[16];
     int count = 0;
     arguments[count++] = (char *)program;
     arguments[count++] = "--server";
     arguments[count++] = "--port";
     arguments[count++] = portText;
+    snprintf (local->stopToken, sizeof (local->stopToken), "%016llx",
+              (unsigned long long)(uv_hrtime () ^ ((uint64_t)port << 48)));
+    arguments[count++] = "--stop-token";
+    arguments[count++] = local->stopToken;
     if (loadPath != NULL && loadPath[0] != '\0') {
         arguments[count++] = "--load";
         arguments[count++] = (char *)loadPath;
@@ -151,7 +156,12 @@ static bool StartLocalServer (LocalServer *local, const char *program,
 static void StopLocalServer (LocalServer *local) {
     if (!local->started) return;
 
-    uv_process_kill (&local->process, SIGTERM);
+    for (int i = 0; i < 100 && local->started; i++) {
+        AppLoopPump ();
+        uv_sleep (20);
+    }
+    if (local->started)
+        uv_process_kill (&local->process, SIGTERM);
     for (int i = 0; i < 100 && local->started; i++) {
         AppLoopPump ();
         uv_sleep (20);
@@ -237,6 +247,7 @@ int main (int argc, char **argv) {
     const char *username = NULL;
     const char *loadPath = NULL;
     const char *savePath = NULL;
+    const char *stopToken = NULL;
     int port = 0;
 
     for (int i = 1; i < argc; i++) {
@@ -251,6 +262,8 @@ int main (int argc, char **argv) {
             loadPath = argv[++i];
         } else if (strcmp (argv[i], "--save") == 0 && i + 1 < argc) {
             savePath = argv[++i];
+        } else if (strcmp (argv[i], "--stop-token") == 0 && i + 1 < argc) {
+            stopToken = argv[++i];
         } else if (host == NULL) {
             host = argv[i];
         } else if (port == 0) {
@@ -275,6 +288,7 @@ int main (int argc, char **argv) {
         AssetInit ();
         ObjectInit ();
         UserInit ();
+        NetServerSetStopToken (stopToken);
         int result = NetRunServer (port, "0.0.0.0", loadPath, savePath);
         UserUnload ();
         ObjectUnload ();
@@ -340,6 +354,7 @@ int main (int argc, char **argv) {
     ClientRun (&ui, &view, host == NULL, localServer.port, localAddress,
                AppLoopPump, OpenRemoteWindow, argv[0]);
 
+    if (host == NULL) NetRequestServerStop (localServer.stopToken);
     NetClientDisconnect ();
     StopLocalServer (&localServer);
     CloseAppLoop ();
