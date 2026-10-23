@@ -204,7 +204,6 @@ else()
     target_link_options(image_canvas PRIVATE
         --preload-file "${CMAKE_CURRENT_SOURCE_DIR}/assets@assets"
         -sUSE_GLFW=3
-        -sWEBSOCKET
         -sASYNCIFY
         -sALLOW_MEMORY_GROWTH
         -sMAXIMUM_MEMORY=2147483648
