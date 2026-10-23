@@ -2,20 +2,18 @@
 
 #include "save.h"
 
-#include <dirent.h>
+#include <ctype.h>
 #include <limits.h>
 #include <math.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <strings.h>
 #include <sys/stat.h>
 
 #include <json-c/json.h>
-#include <minizip/unzip.h>
-#include <minizip/zip.h>
-#include <zlib.h>
+#include <uv.h>
+#include <zip.h>
 
 #include "assets.h"
 #include "entity.h"
@@ -73,84 +71,77 @@ static bool DskZipAdd (DskZip *zip, const char *name,
 
 static bool DskReadZip (const char *path, DskZip *zip) {
     memset (zip, 0, sizeof (*zip));
-    unzFile file = unzOpen (path);
+    int error = 0;
+    zip_t *file = zip_open (path, ZIP_RDONLY, &error);
     if (file == NULL) return false;
 
-    unz_global_info64 global;
-    if (unzGetGlobalInfo64 (file, &global) != UNZ_OK) {
-        unzClose (file);
+    zip_int64_t count = zip_get_num_entries (file, 0);
+    if (count < 0 || count > DSK_FOLDER_MAX_ENTRIES) {
+        zip_close (file);
         return false;
     }
 
     bool ok = true;
     size_t total = 0;
-    int status = unzGoToFirstFile (file);
-    while (status == UNZ_OK) {
-        unz_file_info64 info;
-        if (unzGetCurrentFileInfo64 (file, &info, NULL, 0, NULL, 0, NULL, 0) !=
-            UNZ_OK || info.size_filename >= 4096) {
+    for (zip_uint64_t i = 0; ok && i < (zip_uint64_t)count; i++) {
+        const char *name = zip_get_name (file, i, 0);
+        if (name == NULL || strlen (name) >= 4096) {
             ok = false;
             break;
         }
 
-        char name[4096];
-        if (unzGetCurrentFileInfo64 (file, &info, name, sizeof (name),
-                                     NULL, 0, NULL, 0) != UNZ_OK) {
+        zip_stat_t stat;
+        zip_stat_init (&stat);
+        if (zip_stat_index (file, i, 0, &stat) != 0 ||
+            !(stat.valid & ZIP_STAT_SIZE) ||
+            ((stat.valid & ZIP_STAT_ENCRYPTION_METHOD) &&
+             stat.encryption_method != ZIP_EM_NONE)) {
             ok = false;
             break;
         }
-        name[sizeof (name) - 1] = '\0';
 
-        bool directory = name[0] != '\0' && name[strlen (name) - 1] == '/';
-        if (!directory) {
-            uint64_t size = info.uncompressed_size;
-            if ((info.flag & 1) != 0 || size > DSK_ZIP_MAX_ENTRY ||
-                size > SIZE_MAX || total > DSK_ZIP_MAX_TOTAL - size) {
-                ok = false;
-                break;
-            }
+        size_t nameLength = strlen (name);
+        if (nameLength > 0 && name[nameLength - 1] == '/') continue;
 
-            unsigned char *data = size > 0 ? malloc ((size_t)size) : NULL;
-            if (size > 0 && data == NULL) {
-                ok = false;
-                break;
-            }
-
-            if (unzOpenCurrentFile (file) != UNZ_OK) {
-                free (data);
-                ok = false;
-                break;
-            }
-
-            size_t offset = 0;
-            while (offset < (size_t)size) {
-                size_t left = (size_t)size - offset;
-                unsigned int chunk = left > (1024u * 1024u)
-                                         ? (unsigned int)(1024u * 1024u)
-                                         : (unsigned int)left;
-                int read = unzReadCurrentFile (file, data + offset, chunk);
-                if (read <= 0) {
-                    ok = false;
-                    break;
-                }
-                offset += (size_t)read;
-            }
-
-            int closeStatus = unzCloseCurrentFile (file);
-            if (!ok || closeStatus != UNZ_OK ||
-                !DskZipAdd (zip, name, data, (size_t)size)) {
-                free (data);
-                ok = false;
-                break;
-            }
-            total += (size_t)size;
+        uint64_t size = stat.size;
+        if (size > DSK_ZIP_MAX_ENTRY || size > SIZE_MAX ||
+            total > DSK_ZIP_MAX_TOTAL - size) {
+            ok = false;
+            break;
         }
 
-        status = unzGoToNextFile (file);
+        unsigned char *data = size > 0 ? malloc ((size_t)size) : NULL;
+        if (size > 0 && data == NULL) {
+            ok = false;
+            break;
+        }
+
+        zip_file_t *entry = zip_fopen_index (file, i, 0);
+        if (entry == NULL) {
+            free (data);
+            ok = false;
+            break;
+        }
+        size_t offset = 0;
+        while (offset < (size_t)size) {
+            zip_int64_t read = zip_fread (entry, data + offset,
+                                          (zip_uint64_t)((size_t)size - offset));
+            if (read <= 0) {
+                ok = false;
+                break;
+            }
+            offset += (size_t)read;
+        }
+        if (zip_fclose (entry) != 0) ok = false;
+        if (!ok || !DskZipAdd (zip, name, data, (size_t)size)) {
+            free (data);
+            ok = false;
+            break;
+        }
+        total += (size_t)size;
     }
 
-    if (status != UNZ_END_OF_LIST_OF_FILE) ok = false;
-    unzClose (file);
+    zip_close (file);
     if (!ok) {
         DskZipFree (zip);
         return false;
@@ -159,23 +150,50 @@ static bool DskReadZip (const char *path, DskZip *zip) {
 }
 
 
+static bool DskUvStat (const char *path, uv_stat_t *info, bool link) {
+    uv_fs_t request;
+    int result = link ? uv_fs_lstat (NULL, &request, path, NULL)
+                      : uv_fs_stat (NULL, &request, path, NULL);
+    if (result < 0) {
+        uv_fs_req_cleanup (&request);
+        return false;
+    }
+    *info = request.statbuf;
+    uv_fs_req_cleanup (&request);
+    return true;
+}
+
 static bool DskReadDiskFile (const char *path, uint64_t expected,
                              unsigned char **data, size_t *size) {
-    FILE *file = fopen (path, "rb");
-    if (file == NULL) return false;
+    uv_fs_t request;
+    int openResult = uv_fs_open (NULL, &request, path, UV_FS_O_RDONLY, 0, NULL);
+    uv_fs_req_cleanup (&request);
+    if (openResult < 0) return false;
 
-    unsigned char *bytes = NULL;
-    if (expected > 0) {
-        bytes = malloc ((size_t)expected);
-        if (bytes == NULL) {
-            fclose (file);
-            return false;
-        }
+    int fd = openResult;
+    unsigned char *bytes = expected > 0 ? malloc ((size_t)expected) : NULL;
+    if (expected > 0 && bytes == NULL) {
+        uv_fs_close (NULL, &request, fd, NULL);
+        uv_fs_req_cleanup (&request);
+        return false;
     }
 
-    bool ok = expected == 0 ||
-              fread (bytes, 1, (size_t)expected, file) == (size_t)expected;
-    fclose (file);
+    bool ok = true;
+    size_t offset = 0;
+    while (offset < (size_t)expected) {
+        size_t left = (size_t)expected - offset;
+        uv_buf_t buffer = uv_buf_init ((char *)bytes + offset,
+                                       (unsigned int)left);
+        int read = uv_fs_read (NULL, &request, fd, &buffer, 1, (int64_t)offset, NULL);
+        uv_fs_req_cleanup (&request);
+        if (read <= 0) {
+            ok = false;
+            break;
+        }
+        offset += (size_t)read;
+    }
+    uv_fs_close (NULL, &request, fd, NULL);
+    uv_fs_req_cleanup (&request);
     if (!ok) {
         free (bytes);
         return false;
@@ -196,22 +214,26 @@ static bool DskReadDirectoryTree (const char *root, const char *relative,
                                  root, relative);
     if (length < 0 || (size_t)length >= sizeof (directoryPath)) return false;
 
-    DIR *directory = opendir (directoryPath);
-    if (directory == NULL) return false;
+    uv_fs_t request;
+    int scanResult = uv_fs_scandir (NULL, &request, directoryPath, 0, NULL);
+    if (scanResult < 0) {
+        uv_fs_req_cleanup (&request);
+        return false;
+    }
 
     bool ok = true;
-    struct dirent *entry;
-    while (ok && (entry = readdir (directory)) != NULL) {
-        if (strcmp (entry->d_name, ".") == 0 ||
-            strcmp (entry->d_name, "..") == 0)
+    uv_dirent_t entry;
+    int next;
+    while (ok && (next = uv_fs_scandir_next (&request, &entry)) == 0) {
+        if (strcmp (entry.name, ".") == 0 || strcmp (entry.name, "..") == 0)
             continue;
 
         char childRelative[DSK_PATH_MAX];
         length = relative[0] == '\0'
                      ? snprintf (childRelative, sizeof (childRelative), "%s",
-                                 entry->d_name)
+                                 entry.name)
                      : snprintf (childRelative, sizeof (childRelative), "%s/%s",
-                                 relative, entry->d_name);
+                                 relative, entry.name);
         if (length < 0 || (size_t)length >= sizeof (childRelative)) {
             ok = false;
             break;
@@ -225,24 +247,20 @@ static bool DskReadDirectoryTree (const char *root, const char *relative,
             break;
         }
 
-        struct stat info;
-        if (lstat (childPath, &info) != 0) {
+        uv_stat_t info;
+        if (!DskUvStat (childPath, &info, true)) {
             ok = false;
             break;
         }
         if (S_ISLNK (info.st_mode)) continue;
-
         if (S_ISDIR (info.st_mode)) {
             if (!DskReadDirectoryTree (root, childRelative, zip, total,
-                                       depth + 1)) {
+                                       depth + 1))
                 ok = false;
-                break;
-            }
             continue;
         }
         if (!S_ISREG (info.st_mode)) continue;
-        if (info.st_size < 0 ||
-            (uint64_t)info.st_size > DSK_ZIP_MAX_ENTRY ||
+        if ((uint64_t)info.st_size > DSK_ZIP_MAX_ENTRY ||
             (uint64_t)info.st_size > SIZE_MAX ||
             *total > DSK_ZIP_MAX_TOTAL - (uint64_t)info.st_size ||
             zip->count >= DSK_FOLDER_MAX_ENTRIES) {
@@ -261,16 +279,15 @@ static bool DskReadDirectoryTree (const char *root, const char *relative,
         }
         *total += size;
     }
-
-    closedir (directory);
+    if (next != UV_EOF) ok = false;
+    uv_fs_req_cleanup (&request);
     return ok;
 }
 
 static bool DskReadSource (const char *path, DskZip *zip) {
-    struct stat info;
-    if (path == NULL || path[0] == '\0' || stat (path, &info) != 0)
+    uv_stat_t info;
+    if (path == NULL || path[0] == '\0' || !DskUvStat (path, &info, false))
         return false;
-
     if (!S_ISDIR (info.st_mode)) return DskReadZip (path, zip);
 
     memset (zip, 0, sizeof (*zip));
@@ -281,6 +298,28 @@ static bool DskReadSource (const char *path, DskZip *zip) {
         return false;
     }
     return true;
+}
+
+
+static bool DskEqualsN (const char *left, const char *right, size_t length) {
+    for (size_t i = 0; i < length; i++) {
+        unsigned char a = (unsigned char)left[i];
+        unsigned char b = (unsigned char)right[i];
+        if (tolower (a) != tolower (b)) return false;
+    }
+    return true;
+}
+
+static bool DskEquals (const char *left, const char *right) {
+    size_t length = strlen (left);
+    return strlen (right) == length && DskEqualsN (left, right, length);
+}
+
+static bool DskEndsWith (const char *text, const char *suffix) {
+    size_t length = strlen (text);
+    size_t suffixLength = strlen (suffix);
+    return length >= suffixLength &&
+           DskEquals (text + length - suffixLength, suffix);
 }
 
 typedef enum {
@@ -306,8 +345,8 @@ static DskZipKind DskZipClassify (const char *name, const char **relative) {
             return DSK_ZIP_OBJECT;
         }
         if (slash == NULL &&
-            ((length == 10 && strncasecmp (part, "scene.json", 10) == 0) ||
-             (length == 11 && strncasecmp (part, "scene.hjson", 11) == 0))) {
+            ((length == 10 && DskEqualsN (part, "scene.json", 10)) ||
+             (length == 11 && DskEqualsN (part, "scene.hjson", 11)))) {
             *relative = part;
             return DSK_ZIP_SCENE;
         }
@@ -399,9 +438,9 @@ static char *DskObjectName (const char *relative) {
     const char *rest = relative + strlen ("objects/");
     size_t length = strlen (rest);
     size_t suffixLength = 0;
-    if (length > 5 && strcasecmp (rest + length - 5, ".json") == 0)
+    if (length > 5 && DskEndsWith (rest, ".json"))
         suffixLength = 5;
-    else if (length > 6 && strcasecmp (rest + length - 6, ".hjson") == 0)
+    else if (length > 6 && DskEndsWith (rest, ".hjson"))
         suffixLength = 6;
     else
         return NULL;
@@ -713,8 +752,8 @@ static bool DskLoadSceneZip (const DskZip *zip, ScriptEnv *globalEnv,
         const char *relative = NULL;
         if (DskZipClassify (zip->entries[i].name, &relative) ==
                 DSK_ZIP_SCENE &&
-            (strcasecmp (relative, "scene.json") == 0 ||
-             strcasecmp (relative, "scene.hjson") == 0)) {
+            (DskEquals (relative, "scene.json") ||
+             DskEquals (relative, "scene.hjson"))) {
             scene = &zip->entries[i];
             break;
         }
@@ -804,26 +843,59 @@ static bool DskLoadSceneZip (const DskZip *zip, ScriptEnv *globalEnv,
     return true;
 }
 
-static bool DskZipWriteData (zipFile file, const char *name,
-                             const unsigned char *data, size_t size) {
-    zip_fileinfo info;
-    memset (&info, 0, sizeof (info));
-    if (zipOpenNewFileInZip (file, name, &info, NULL, 0, NULL, 0, NULL,
-                             Z_DEFLATED, Z_DEFAULT_COMPRESSION) != ZIP_OK)
-        return false;
+typedef struct {
+    zip_t *zip;
+    unsigned char **owned;
+    int ownedCount;
+    int ownedCapacity;
+} DskWriter;
 
-    size_t offset = 0;
-    while (offset < size) {
-        size_t left = size - offset;
-        unsigned int chunk = left > (1024u * 1024u)
-                                 ? (unsigned int)(1024u * 1024u)
-                                 : (unsigned int)left;
-        if (zipWriteInFileInZip (file, data + offset, chunk) != ZIP_OK)
-            return false;
-        offset += (size_t)chunk;
+static bool DskWriterKeep (DskWriter *writer, unsigned char *data) {
+    if (writer->ownedCount == writer->ownedCapacity) {
+        int capacity = writer->ownedCapacity == 0 ? 16 : writer->ownedCapacity * 2;
+        unsigned char **owned = realloc (
+            writer->owned, (size_t)capacity * sizeof (unsigned char *));
+        if (owned == NULL) return false;
+        writer->owned = owned;
+        writer->ownedCapacity = capacity;
     }
-    return zipCloseFileInZip (file) == ZIP_OK;
+    writer->owned[writer->ownedCount++] = data;
+    return true;
 }
+
+static void DskWriterFree (DskWriter *writer) {
+    for (int i = 0; i < writer->ownedCount; i++) free (writer->owned[i]);
+    free (writer->owned);
+    memset (writer, 0, sizeof (*writer));
+}
+
+static bool DskZipWriteData (DskWriter *writer, const char *name,
+                             const unsigned char *data, size_t size,
+                             bool copy) {
+    if (copy) {
+        unsigned char *owned = malloc (size);
+        if (owned == NULL) return false;
+        memcpy (owned, data, size);
+        if (!DskWriterKeep (writer, owned)) {
+            free (owned);
+            return false;
+        }
+        data = owned;
+    }
+
+    zip_source_t *source = zip_source_buffer (writer->zip, data,
+                                              (zip_uint64_t)size, 0);
+    if (source == NULL) return false;
+    zip_int64_t index = zip_file_add (writer->zip, name, source,
+                                      ZIP_FL_ENC_UTF_8);
+    if (index < 0) {
+        zip_source_free (source);
+        return false;
+    }
+    return zip_set_file_compression (writer->zip, (zip_uint64_t)index,
+                                     ZIP_CM_DEFLATE, 9) == 0;
+}
+
 
 static bool DskPutEnv (struct json_object *root, const char *key,
                        ScriptEnv *globalEnv, u64 id) {
@@ -884,7 +956,7 @@ static bool DskPutMenu (struct json_object *root, const char *key, u64 id) {
     return true;
 }
 
-static bool DskWriteAssetZip (zipFile file, const Asset *asset) {
+static bool DskWriteAssetZip (DskWriter *writer, const Asset *asset) {
     if (asset->fileSize < 0 ||
         (asset->fileSize > 0 && asset->fileData == NULL)) return false;
 
@@ -908,13 +980,13 @@ static bool DskWriteAssetZip (zipFile file, const Asset *asset) {
     write += extLength;
     *write = '\0';
 
-    bool ok = DskZipWriteData (file, path, asset->fileData,
-                               (size_t)asset->fileSize);
+    bool ok = DskZipWriteData (writer, path, asset->fileData,
+                               (size_t)asset->fileSize, false);
     free (path);
     return ok;
 }
 
-static bool DskWriteObjectZip (zipFile file, ScriptEnv *globalEnv,
+static bool DskWriteObjectZip (DskWriter *writer, ScriptEnv *globalEnv,
                                const Object *object) {
     struct json_object *root = json_object_new_object ();
     struct json_object *assets = json_object_new_array ();
@@ -965,8 +1037,8 @@ static bool DskWriteObjectZip (zipFile file, ScriptEnv *globalEnv,
         if (path != NULL) {
             snprintf (path, pathLength + 1, "dsk/objects/%s.json",
                       object->name);
-            ok = DskZipWriteData (file, path, (const unsigned char *)text,
-                                  strlen (text));
+            ok = DskZipWriteData (writer, path, (const unsigned char *)text,
+                                  strlen (text), true);
             free (path);
         }
     }
@@ -974,7 +1046,7 @@ static bool DskWriteObjectZip (zipFile file, ScriptEnv *globalEnv,
     return ok;
 }
 
-static bool DskWriteSceneZip (zipFile file, ScriptEnv *globalEnv) {
+static bool DskWriteSceneZip (DskWriter *writer, ScriptEnv *globalEnv) {
     struct json_object *root = json_object_new_object ();
     if (root == NULL) return false;
 
@@ -989,30 +1061,67 @@ static bool DskWriteSceneZip (zipFile file, ScriptEnv *globalEnv) {
     const char *text = json_object_to_json_string_ext (
         root, JSON_C_TO_STRING_PLAIN);
     bool ok = text != NULL &&
-              DskZipWriteData (file, "dsk/scene.json",
-                               (const unsigned char *)text, strlen (text));
+              DskZipWriteData (writer, "dsk/scene.json",
+                               (const unsigned char *)text, strlen (text), true);
     json_object_put (root);
     return ok;
 }
 
-static bool DskWriteZip (const char *path, ScriptEnv *globalEnv) {
-    size_t pathLength = strlen (path);
-    char *tempPath = malloc (pathLength + sizeof (".tmp"));
-    if (tempPath == NULL) return false;
-    snprintf (tempPath, pathLength + sizeof (".tmp"), "%s.tmp", path);
+static char *DskTempPath (const char *path) {
+    size_t size = strlen (path) + 64;
+    char *temp = malloc (size);
+    if (temp == NULL) return NULL;
+    snprintf (temp, size, "%s.tmp-%ld", path, (long)uv_os_getpid ());
+    return temp;
+}
 
-    zipFile file = zipOpen (tempPath, APPEND_STATUS_CREATE);
-    if (file == NULL) {
+static bool DskSyncFile (const char *path) {
+    uv_fs_t request;
+    int openResult = uv_fs_open (NULL, &request, path, UV_FS_O_RDWR, 0, NULL);
+    uv_fs_req_cleanup (&request);
+    if (openResult < 0) return false;
+
+    int fd = openResult;
+    bool ok = uv_fs_fsync (NULL, &request, fd, NULL) == 0;
+    uv_fs_req_cleanup (&request);
+    if (uv_fs_close (NULL, &request, fd, NULL) < 0) ok = false;
+    uv_fs_req_cleanup (&request);
+    return ok;
+}
+
+static bool DskReplaceFile (const char *temp, const char *path) {
+    uv_fs_t request;
+    int result = uv_fs_rename (NULL, &request, temp, path, NULL);
+    uv_fs_req_cleanup (&request);
+    return result == 0;
+}
+
+static void DskRemoveFile (const char *path) {
+    uv_fs_t request;
+    uv_fs_unlink (NULL, &request, path, NULL);
+    uv_fs_req_cleanup (&request);
+}
+
+static bool DskWriteZip (const char *path, ScriptEnv *globalEnv) {
+    char *tempPath = DskTempPath (path);
+    if (tempPath == NULL) return false;
+
+    int error = 0;
+    zip_t *archive = zip_open (tempPath, ZIP_CREATE | ZIP_TRUNCATE, &error);
+    if (archive == NULL) {
         free (tempPath);
         return false;
     }
 
+    DskWriter writer = {0};
+    writer.zip = archive;
     bool ok = true;
+
     IdGroup assetIds = AssetIds ();
     for (int i = 0; ok && i < assetIds.count; i++) {
         Asset *asset = EntityFind (assetIds.ids[i]);
         if (asset == NULL) ok = false;
-        else ok = DskWriteAssetZip (file, asset);
+        else ok = DskWriteAssetZip (&writer, asset);
     }
     IdGroupUnload (&assetIds);
 
@@ -1020,15 +1129,19 @@ static bool DskWriteZip (const char *path, ScriptEnv *globalEnv) {
     for (int i = 0; ok && i < objectIds.count; i++) {
         Object *object = EntityFind (objectIds.ids[i]);
         if (object == NULL) ok = false;
-        else ok = DskWriteObjectZip (file, globalEnv, object);
+        else ok = DskWriteObjectZip (&writer, globalEnv, object);
     }
     IdGroupUnload (&objectIds);
 
-    if (ok) ok = DskWriteSceneZip (file, globalEnv);
-    if (zipClose (file, NULL) != ZIP_OK) ok = false;
+    if (ok) ok = DskWriteSceneZip (&writer, globalEnv);
+    if (zip_close (archive) != 0) {
+        if (ok) zip_discard (archive);
+        ok = false;
+    }
+    DskWriterFree (&writer);
 
-    if (!ok || rename (tempPath, path) != 0) {
-        remove (tempPath);
+    if (!ok || !DskSyncFile (tempPath) || !DskReplaceFile (tempPath, path)) {
+        DskRemoveFile (tempPath);
         free (tempPath);
         return false;
     }

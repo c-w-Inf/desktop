@@ -8,9 +8,9 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/wait.h>
 
 #include "raymath.h"
+#include "tinyfiledialogs.h"
 
 #include "assets.h"
 #include "menu.h"
@@ -94,110 +94,55 @@ static bool DiscardDroppedFiles (void) {
     return true;
 }
 
-// 打开系统文件对话框，返回选中的图片路径
-static bool OpenImageDialog (Ui *ui, char *path, int pathSize) {
+static bool DialogPath (Ui *ui, char *path, int pathSize,
+                        const char *selected, const char *failure) {
     path[0] = '\0';
-
-    FILE *pipe = popen ("zenity --file-selection --modal --title='选择图片' "
-                        "--file-filter='图片 | *.png *.jpg *.jpeg *.bmp *.tga *.gif *.qoi *.psd' "
-                        "2>/dev/null",
-                        "r");
-    if (pipe == NULL) {
-        UiShowError (ui, "打开文件对话框失败");
+    if (selected == NULL) return false;
+    if (strlen (selected) >= (size_t)pathSize) {
+        UiShowError (ui, "路径过长");
         return false;
     }
-
-    bool selected = false;
-
-    if (fgets (path, pathSize, pipe) != NULL) {
-        path[strcspn (path, "\r\n")] = '\0';
-        selected = (path[0] != '\0');
+    snprintf (path, (size_t)pathSize, "%s", selected);
+    if (path[0] == '\0') {
+        UiShowError (ui, failure);
+        return false;
     }
+    return true;
+}
 
-    int status = pclose (pipe);
-    if (!selected && WIFEXITED (status) &&
-        (WEXITSTATUS (status) == 126 || WEXITSTATUS (status) == 127))
-        UiShowError (ui, "打开文件对话框失败");
-
-    // 文件对话框打开期间发生的拖入事件直接丢弃，并提示
+static bool OpenImageDialog (Ui *ui, char *path, int pathSize) {
+    static const char *patterns[] = {
+        "*.png", "*.jpg", "*.jpeg", "*.bmp", "*.tga",
+        "*.gif", "*.qoi", "*.psd"
+    };
+    const char *selected = tinyfd_openFileDialog (
+        "选择图片", "", 8, patterns, "图片", 0);
+    bool ok = DialogPath (ui, path, pathSize, selected, "打开文件对话框失败");
     if (DiscardDroppedFiles ()) UiShowError (ui, "弹窗打开时不能拖入文件");
-
-    return selected;
+    return ok;
 }
 
 static bool OpenImportDialog (Ui *ui, char *path, int pathSize) {
-    path[0] = '\0';
-
-    FILE *pipe = popen ("zenity --file-selection --modal --title='导入' "
-                        "--file-filter='支持的文件 | *.dsk *.png *.jpg *.jpeg *.bmp *.tga *.gif *.qoi *.psd' "
-                        "2>/dev/null",
-                        "r");
-    if (pipe == NULL) {
-        UiShowError (ui, "打开文件对话框失败");
-        return false;
-    }
-
-    bool selected = false;
-    if (fgets (path, pathSize, pipe) != NULL) {
-        path[strcspn (path, "\r\n")] = '\0';
-        selected = path[0] != '\0';
-    }
-
-    int status = pclose (pipe);
-    if (!selected && WIFEXITED (status) &&
-        (WEXITSTATUS (status) == 126 || WEXITSTATUS (status) == 127))
-        UiShowError (ui, "打开文件对话框失败");
-    return selected;
+    static const char *patterns[] = {
+        "*.dsk", "*.png", "*.jpg", "*.jpeg", "*.bmp",
+        "*.tga", "*.gif", "*.qoi", "*.psd"
+    };
+    const char *selected = tinyfd_openFileDialog (
+        "导入", "", 9, patterns, "支持的文件", 0);
+    return DialogPath (ui, path, pathSize, selected, "打开文件对话框失败");
 }
 
 static bool OpenFolderDialog (Ui *ui, char *path, int pathSize) {
-    path[0] = '\0';
-
-    FILE *pipe = popen ("zenity --file-selection --directory --modal "
-                        "--title='导入文件夹' 2>/dev/null",
-                        "r");
-    if (pipe == NULL) {
-        UiShowError (ui, "打开文件夹对话框失败");
-        return false;
-    }
-
-    bool selected = false;
-    if (fgets (path, pathSize, pipe) != NULL) {
-        path[strcspn (path, "\r\n")] = '\0';
-        selected = path[0] != '\0';
-    }
-
-    int status = pclose (pipe);
-    if (!selected && WIFEXITED (status) &&
-        (WEXITSTATUS (status) == 126 || WEXITSTATUS (status) == 127))
-        UiShowError (ui, "打开文件夹对话框失败");
-    return selected;
+    const char *selected = tinyfd_selectFolderDialog ("导入文件夹", "");
+    return DialogPath (ui, path, pathSize, selected, "打开文件夹对话框失败");
 }
 
 static bool OpenExportDialog (Ui *ui, char *path, int pathSize) {
-    path[0] = '\0';
-
-    FILE *pipe = popen ("zenity --file-selection --save --confirm-overwrite --modal "
-                        "--title='导出存档' --filename='image_canvas.dsk' "
-                        "--file-filter='存档 | *.dsk' 2>/dev/null",
-                        "r");
-    if (pipe == NULL) {
-        UiShowError (ui, "打开文件对话框失败");
+    static const char *patterns[] = {"*.dsk"};
+    const char *selected = tinyfd_saveFileDialog (
+        "导出存档", "image_canvas.dsk", 1, patterns, "存档");
+    if (!DialogPath (ui, path, pathSize, selected, "打开文件对话框失败"))
         return false;
-    }
-
-    bool selected = false;
-    if (fgets (path, pathSize, pipe) != NULL) {
-        path[strcspn (path, "\r\n")] = '\0';
-        selected = path[0] != '\0';
-    }
-
-    int status = pclose (pipe);
-    if (!selected && WIFEXITED (status) &&
-        (WEXITSTATUS (status) == 126 || WEXITSTATUS (status) == 127))
-        UiShowError (ui, "打开文件对话框失败");
-    if (!selected) return false;
-
     size_t length = strlen (path);
     if (length < 4 || strcmp (path + length - 4, ".dsk") != 0) {
         if ((size_t)pathSize <= length + 4) {

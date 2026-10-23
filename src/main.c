@@ -7,27 +7,15 @@
 //   左键点击选中物件，按住拖动；选中物件显示 alpha 兼容的阴影 shader
 //   拖动空白处平移 / 滚轮缩放
 
-#define _GNU_SOURCE
-#define _DEFAULT_SOURCE
-#define _POSIX_C_SOURCE 200809L
-
-#include <arpa/inet.h>
-#include <ifaddrs.h>
-#include <net/if.h>
-#include <netinet/in.h>
 #include <signal.h>
-#include <spawn.h>
 #include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/socket.h>
-#include <sys/wait.h>
 #include <time.h>
-#include <unistd.h>
 
-#include "subprocess.h"
+#include <uv.h>
 
 #include "raylib.h"
 #include "raymath.h"
@@ -41,7 +29,7 @@
 #include "ui.h"
 #include "view.h"
 
-extern char **environ;
+
 
 static void PrintUsage (const char *program) {
     fprintf (stderr,
@@ -53,71 +41,75 @@ static void PrintUsage (const char *program) {
 }
 
 typedef struct {
-    struct subprocess_s process;
+    uv_process_t process;
+    uv_pipe_t control;
+    uv_write_t controlWrite;
     int port;
     bool started;
+    bool exited;
+    bool controlOpen;
 } LocalServer;
 
+static uv_loop_t appLoop;
+static bool appLoopInitialized;
+
+static void AppLoopPump (void) {
+    if (appLoopInitialized) uv_run (&appLoop, UV_RUN_NOWAIT);
+}
+
 static int PickFreePort (void) {
-    int fd = socket (AF_INET, SOCK_STREAM, 0);
-    if (fd < 0) return 0;
+    uv_tcp_t probe;
+    if (uv_tcp_init (&appLoop, &probe) != 0) return 0;
 
     struct sockaddr_in address;
-    memset (&address, 0, sizeof (address));
-    address.sin_family = AF_INET;
-    address.sin_addr.s_addr = htonl (INADDR_LOOPBACK);
-    address.sin_port = 0;
-
+    uv_ip4_addr ("127.0.0.1", 0, &address);
     int port = 0;
-    if (bind (fd, (struct sockaddr *)&address, sizeof (address)) == 0) {
-        socklen_t length = sizeof (address);
-        if (getsockname (fd, (struct sockaddr *)&address, &length) == 0)
-            port = ntohs (address.sin_port);
+    if (uv_tcp_bind (&probe, (const struct sockaddr *)&address, 0) == 0) {
+        struct sockaddr_storage name;
+        int length = sizeof (name);
+        if (uv_tcp_getsockname (&probe, (struct sockaddr *)&name, &length) == 0) {
+            const struct sockaddr_in *bound = (const struct sockaddr_in *)&name;
+            port = ntohs (bound->sin_port);
+        }
     }
-    close (fd);
+    uv_close ((uv_handle_t *)&probe, NULL);
+    uv_run (&appLoop, UV_RUN_DEFAULT);
     return port;
 }
 
 static void GetLocalAddress (char *text, int size) {
     snprintf (text, (size_t)size, "127.0.0.1");
 
-    struct ifaddrs *interfaces = NULL;
-    if (getifaddrs (&interfaces) != 0) return;
-
-    for (struct ifaddrs *entry = interfaces; entry != NULL; entry = entry->ifa_next) {
-        if (entry->ifa_addr == NULL || entry->ifa_addr->sa_family != AF_INET) continue;
-        if ((entry->ifa_flags & IFF_LOOPBACK) != 0) continue;
-
-        char address[INET_ADDRSTRLEN];
-        struct sockaddr_in *ipv4 = (struct sockaddr_in *)entry->ifa_addr;
-        if (inet_ntop (AF_INET, &ipv4->sin_addr, address, sizeof (address)) != NULL) {
+    uv_interface_address_t *interfaces = NULL;
+    int count = 0;
+    if (uv_interface_addresses (&interfaces, &count) != 0) return;
+    for (int i = 0; i < count; i++) {
+        if (interfaces[i].is_internal) continue;
+        if (interfaces[i].address.address4.sin_family != AF_INET) continue;
+        char address[64];
+        if (uv_ip4_name (&interfaces[i].address.address4, address,
+                         sizeof (address)) == 0) {
             snprintf (text, (size_t)size, "%s", address);
             break;
         }
     }
-
-    freeifaddrs (interfaces);
+    uv_free_interface_addresses (interfaces, count);
 }
 
-static void StopLocalServer (LocalServer *local) {
-    if (!local->started) return;
-
-#ifndef _WIN32
-    // 先请求服务端正常退出，让它有机会写入存档；超时后再强制结束。
-    if (local->process.child != 0) {
-        kill (local->process.child, SIGTERM);
-        for (int i = 0; i < 100 && subprocess_alive (&local->process); i++) {
-            struct timespec wait = {0, 20 * 1000 * 1000};
-            nanosleep (&wait, NULL);
+static void LocalServerExited (uv_process_t *process, int64_t status,
+                               int signal) {
+    (void)status;
+    (void)signal;
+    LocalServer *local = process->data;
+    if (local != NULL) {
+        local->exited = true;
+        local->started = false;
+        if (local->controlOpen) {
+            uv_close ((uv_handle_t *)&local->control, NULL);
+            local->controlOpen = false;
         }
     }
-#endif
-
-    if (subprocess_alive (&local->process))
-        subprocess_terminate (&local->process);
-    subprocess_join (&local->process, NULL);
-    subprocess_destroy (&local->process);
-    local->started = false;
+    uv_close ((uv_handle_t *)process, NULL);
 }
 
 static bool StartLocalServer (LocalServer *local, const char *program,
@@ -129,70 +121,103 @@ static bool StartLocalServer (LocalServer *local, const char *program,
 
     char portText[16];
     snprintf (portText, sizeof (portText), "%d", port);
-    const char *command[10];
+    char *arguments[12];
     int count = 0;
-    command[count++] = program;
-    command[count++] = "--server";
-    command[count++] = "--port";
-    command[count++] = portText;
+    arguments[count++] = (char *)program;
+    arguments[count++] = "--server";
+    arguments[count++] = "--port";
+    arguments[count++] = portText;
+    arguments[count++] = "--control-stdin";
     if (loadPath != NULL && loadPath[0] != '\0') {
-        command[count++] = "--load";
-        command[count++] = loadPath;
+        arguments[count++] = "--load";
+        arguments[count++] = (char *)loadPath;
     }
     if (savePath != NULL && savePath[0] != '\0') {
-        command[count++] = "--save";
-        command[count++] = savePath;
+        arguments[count++] = "--save";
+        arguments[count++] = (char *)savePath;
     }
-    command[count] = NULL;
+    arguments[count] = NULL;
 
-    int options = subprocess_option_inherit_environment |
-                  subprocess_option_search_user_path |
-                  subprocess_option_combined_stdout_stderr;
-    if (subprocess_create (command, options, &local->process) != 0) return false;
+    if (uv_pipe_init (&appLoop, &local->control, 0) != 0) return false;
+    local->controlOpen = true;
 
+    uv_stdio_container_t stdio[3];
+    memset (stdio, 0, sizeof (stdio));
+    stdio[0].flags = UV_CREATE_PIPE | UV_READABLE_PIPE;
+    stdio[0].data.stream = (uv_stream_t *)&local->control;
+    stdio[1].flags = UV_IGNORE;
+    stdio[2].flags = UV_IGNORE;
+
+    uv_process_options_t options;
+    memset (&options, 0, sizeof (options));
+    options.exit_cb = LocalServerExited;
+    options.file = program;
+    options.args = arguments;
+    options.stdio = stdio;
+    options.stdio_count = 3;
+#ifdef _WIN32
+    options.flags |= UV_PROCESS_WINDOWS_HIDE;
+#endif
+
+    int result = uv_spawn (&appLoop, &local->process, &options);
+    if (result != 0) {
+        uv_close ((uv_handle_t *)&local->control, NULL);
+        local->controlOpen = false;
+        return false;
+    }
+    local->process.data = local;
     local->port = port;
     local->started = true;
+    local->exited = false;
     return true;
+}
+
+static void StopLocalServer (LocalServer *local) {
+    if (!local->started) return;
+
+    static const char command[] = "stop\n";
+    if (local->controlOpen) {
+        uv_buf_t buffer = uv_buf_init ((char *)command, sizeof (command) - 1);
+        uv_write (&local->controlWrite, (uv_stream_t *)&local->control,
+                  &buffer, 1, NULL);
+    }
+    for (int i = 0; i < 100 && local->started; i++) {
+        AppLoopPump ();
+        uv_sleep (20);
+    }
+    if (local->started) {
+        uv_process_kill (&local->process, SIGTERM);
+        for (int i = 0; i < 100 && local->started; i++) {
+            AppLoopPump ();
+            uv_sleep (20);
+        }
+    }
+    if (local->controlOpen) {
+        uv_close ((uv_handle_t *)&local->control, NULL);
+        local->controlOpen = false;
+    }
+    local->started = false;
 }
 
 static bool ConnectLocalSession (LocalServer *local, const char *program,
                                  const char *loadPath, const char *savePath) {
     if (!StartLocalServer (local, program, loadPath, savePath)) return false;
-
     for (int i = 0; i < 100; i++) {
+        AppLoopPump ();
+        if (!local->started) break;
         if (NetClientConnect ("127.0.0.1", local->port, "local")) return true;
-        struct timespec wait = {0, 20 * 1000 * 1000};
-        nanosleep (&wait, NULL);
+        uv_sleep (20);
     }
     StopLocalServer (local);
     return false;
 }
 
-static pid_t *remotePids;
-static int remotePidCount;
-static int remotePidCapacity;
-
-static void ReapRemoteWindows (void) {
-    for (int i = 0; i < remotePidCount;) {
-        pid_t result = waitpid (remotePids[i], NULL, WNOHANG);
-        if (result == 0) {
-            i++;
-            continue;
-        }
-        remotePids[i] = remotePids[--remotePidCount];
-    }
-}
-
-static bool TrackRemotePid (pid_t pid) {
-    if (remotePidCount == remotePidCapacity) {
-        int capacity = (remotePidCapacity == 0) ? 8 : remotePidCapacity * 2;
-        pid_t *pids = realloc (remotePids, (size_t)capacity * sizeof (pid_t));
-        if (pids == NULL) return false;
-        remotePids = pids;
-        remotePidCapacity = capacity;
-    }
-    remotePids[remotePidCount++] = pid;
-    return true;
+static void RemoteWindowExited (uv_process_t *process, int64_t status,
+                                int signal) {
+    (void)status;
+    (void)signal;
+    uv_close ((uv_handle_t *)process, NULL);
+    free (process);
 }
 
 static bool OpenRemoteWindow (const char *program, const char *host, int port,
@@ -200,10 +225,36 @@ static bool OpenRemoteWindow (const char *program, const char *host, int port,
     char portText[16];
     snprintf (portText, sizeof (portText), "%d", port);
 
-    char *args[] = {(char *)program, (char *)host, portText, "--name", (char *)username, NULL};
-    pid_t pid;
-    if (posix_spawnp (&pid, program, NULL, NULL, args, environ) != 0) return false;
-    return TrackRemotePid (pid);
+    uv_process_t *process = calloc (1, sizeof (*process));
+    if (process == NULL) return false;
+
+    char *arguments[] = {(char *)program, (char *)host, portText,
+                         "--name", (char *)username, NULL};
+    uv_process_options_t options;
+    memset (&options, 0, sizeof (options));
+    options.exit_cb = RemoteWindowExited;
+    options.file = program;
+    options.args = arguments;
+    int result = uv_spawn (&appLoop, process, &options);
+    if (result != 0) {
+        free (process);
+        return false;
+    }
+    return true;
+}
+
+static void CloseProcessHandle (uv_handle_t *handle, void *data) {
+    (void)data;
+    if (handle->type == UV_PROCESS && !uv_is_closing (handle))
+        uv_close (handle, NULL);
+}
+
+static void CloseAppLoop (void) {
+    if (!appLoopInitialized) return;
+    uv_walk (&appLoop, CloseProcessHandle, NULL);
+    uv_run (&appLoop, UV_RUN_DEFAULT);
+    uv_loop_close (&appLoop);
+    appLoopInitialized = false;
 }
 
 static void ReleaseOwnedObjectLock (bool notify) {
@@ -360,6 +411,7 @@ static void DrawNetCursors (const Ui *ui, const View *view) {
 
 int main (int argc, char **argv) {
     bool serverMode = false;
+    bool controlStdin = false;
     const char *host = NULL;
     const char *username = NULL;
     const char *loadPath = NULL;
@@ -371,6 +423,8 @@ int main (int argc, char **argv) {
             serverMode = true;
         } else if (strcmp (argv[i], "--port") == 0 && i + 1 < argc) {
             port = atoi (argv[++i]);
+        } else if (strcmp (argv[i], "--control-stdin") == 0) {
+            controlStdin = true;
         } else if ((strcmp (argv[i], "--name") == 0 ||
                     strcmp (argv[i], "--username") == 0) && i + 1 < argc) {
             username = argv[++i];
@@ -402,6 +456,7 @@ int main (int argc, char **argv) {
         AssetInit ();
         ObjectInit ();
         UserInit ();
+        if (controlStdin) NetServerEnableStdinControl ();
         int result = NetRunServer (port, "0.0.0.0", loadPath, savePath);
         UserUnload ();
         ObjectUnload ();
@@ -427,6 +482,15 @@ int main (int argc, char **argv) {
     AssetInit ();
     ObjectInit ();
     UserInit ();
+    if (uv_loop_init (&appLoop) != 0) {
+        UserUnload ();
+        ObjectUnload ();
+        AssetUnload ();
+        EntityUnload ();
+        CloseWindow ();
+        return 1;
+    }
+    appLoopInitialized = true;
 
     Ui ui;
     UiInit (&ui);
@@ -442,6 +506,7 @@ int main (int argc, char **argv) {
     if (!connected) {
         fprintf (stderr, host != NULL ? "连接服务器失败\n" : "启动本地服务失败\n");
         NetClientDisconnect ();
+        CloseAppLoop ();
         ViewUnload (&view);
         UserUnload ();
         ObjectUnload ();
@@ -470,7 +535,7 @@ int main (int argc, char **argv) {
     u64 sceneVersion = NetClientSceneVersion ();
 
     while (!WindowShouldClose ()) {
-        ReapRemoteWindows ();
+        AppLoopPump ();
 
         ViewUpdateViewport (&view);
 
@@ -1008,7 +1073,7 @@ int main (int argc, char **argv) {
     if (NetClientConnected ()) ReleaseOwnedObjectLocksAndWait ();
     NetClientDisconnect ();
     StopLocalServer (&localServer);
-    free (remotePids);
+    CloseAppLoop ();
     ViewUnload (&view);
     UserUnload ();
     ObjectUnload ();

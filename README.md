@@ -33,9 +33,8 @@
 
 ## 存档
 
-只有显式提供 `--save 文件` 时服务端才会存档：每 30 秒以及收到 `SIGINT` / `SIGTERM` /
-`SIGHUP` 退出时，把当前内容原子写入该文件。写入先落到 `.tmp` 文件，完成后重命名，避免
-中途失败留下半个存档。没有 `--save` 时服务端不写任何存档文件；只给 `--load` 时是只读导入。
+只有显式提供 `--save 文件` 时服务端才会存档：每 30 秒以及正常退出时，把当前内容原子写入
+该文件。写入先落到同目录唯一临时文件，`fsync` 后由 libuv 原子替换，避免中途失败留下半个存档。没有 `--save` 时服务端不写任何存档文件；只给 `--load` 时是只读导入。
 
 普通本地模式启动时不会自动导入；命令行 `--load 文件或目录` 会在启动时加载存档。
 `文件 → 导入`、`文件 → 导入文件夹` 和拖入 `.dsk` 或文件夹则是**增量导入**：不打开新窗口，直接把文件或目录中的全局环境、素材、
@@ -103,36 +102,57 @@ dsk/
 ```text
 image_canvas      编译出的二进制（不提交）
 src/              源代码
-obj/              中间目标文件（make 生成，不提交）
 assets/           UI 字体、脚本等宽字体及许可证
-.deps/usr/include raylib 头文件（提交）
-.deps/usr/lib     本地 raylib 动态库（不提交）
-Makefile
+third_party/      raylib、tinyfiledialogs 等第三方依赖
+build/            CMake 构建目录（不提交）
+.github/          GitHub Actions
+CMakeLists.txt
 README.md
 ```
 
 ## 仓库与依赖
 
-Git 跟踪源码、Makefile、README、`.gitignore`、raylib 头文件，以及
-`assets/WenQuanYiMicroHei.ttf`、`assets/WenQuanYiMicroHeiMono.ttf`、
-`assets/unifont.otf` 及字体许可证文件。以下内容不会提交：
+Git 跟踪源码、CMakeLists.txt、README、`.gitignore`、`.github/`、`assets/` 和
+`third_party/`。以下内容不会提交：
 
-- `image_canvas`、`obj/`、`compile_commands.json`、`*.dsk`
-- `.deps/usr/lib` 和 `.deps/usr/share`
+- `image_canvas`、`build/`、`compile_commands.json`
+- `dsk/`、`*.dsk`、`*.dsk.tmp*`
+- 本地下载并构建的 `.local/`
 
-需要 json-c 0.19 或更高版本，以及 minizip 和 zlib（Arch：`sudo pacman -S json-c minizip zlib`）。
+依赖：
 
-恢复本地依赖：
+- raylib 6.x
+- json-c 0.19+
+- libuv
+- libzip
+- zlib
+- tinyfiledialogs（源码在 `third_party/tinyfiledialogs`）
+
+Linux（Arch）：
 
 ```bash
-# raylib（也可使用系统 raylib：make RAYLIB_DIR=/usr）
-mkdir -p .deps
-curl -LO https://geo.mirror.pkgbuild.com/extra/os/x86_64/raylib-6.2-1-x86_64.pkg.tar.zst
-tar --zstd -xf raylib-6.2-1-x86_64.pkg.tar.zst -C .deps
-
+sudo pacman -S cmake ninja raylib json-c libuv libzip zlib
 ```
 
-Arch 默认 raylib 包不含 JPEG 支持，需要 JPEG 时参考下文重新编译。
+Linux（Debian/Ubuntu）：
+
+```bash
+sudo apt install cmake ninja-build pkg-config libraylib-dev \
+  libjson-c-dev libuv1-dev libzip-dev
+```
+
+Windows 使用 MSYS2 UCRT64，安装：
+
+```bash
+pacman -S mingw-w64-ucrt-x86_64-gcc mingw-w64-ucrt-x86_64-cmake \
+  mingw-w64-ucrt-x86_64-ninja mingw-w64-ucrt-x86_64-pkgconf \
+  mingw-w64-ucrt-x86_64-raylib mingw-w64-ucrt-x86_64-json-c \
+  mingw-w64-ucrt-x86_64-libuv mingw-w64-ucrt-x86_64-libzip \
+  mingw-w64-ucrt-x86_64-zlib
+```
+
+仓库内的 `third_party/raylib` 是可用于本地 Linux 测试的 raylib 安装前缀；CMake 优先
+使用系统安装的 raylib。
 
 ## 代码结构
 
@@ -141,15 +161,15 @@ Arch 默认 raylib 包不含 JPEG 支持，需要 JPEG 时参考下文重新编�
 | `src/main.c` | 主循环：协调 UI 事件、文件拖放、物件拖动和相机 |
 | `src/utils.c` / `src/utils.h` | 公共 `u64`、`IdGroup`、`TextBuffer`、`StrDup` 和随机数工具 |
 | `src/script.c` / `src/script.h` | 脚本解释器：现场解析、按 self 隔离的环境、函数支持参数并内置 `messagef`/`object`/`user`/`flip`/`size`/`assets`/`typeof`/`menu`/`rand`/`int`/`move`/`pos`/`locked`/`color`/`script`/`fork`/`untouch`/`hide`/`show`；运行时值使用 json-c，原生支持 `u64` |
-| `third_party/subprocess.h` | 第三方跨平台子进程库（sheredom/subprocess.h，MIT），用于启动本地服务端进程 |
+| `third_party/tinyfiledialogs.c` / `.h` | 跨平台原生文件/文件夹对话框（zlib licence） |
 | `src/entity.c` / `src/entity.h` | 哈希表：id → 对象指针，平均 O(1) 查找 |
 | `src/menu_array.c` / `src/menu_array.h` | 内部菜单名称/函数数组操作：全局、用户和物件菜单共用同一套增删与替换逻辑 |
 | `src/user.c` / `src/user.h` | 在线用户：用户 ID、名称、光标状态和颜色，支持查找、增删和遍历 |
 | `src/strmap.c` / `src/strmap.h` | 哈希字符串 → `void *` 索引，惰性构建按名称排序的遍历视图 |
-| `src/net.c` / `src/net.h` | TCP 联机：无头服务器、权威场景、增量操作、物件占用、在线光标和全量快照 |
+| `src/net.c` / `src/net.h` | libuv TCP 联机：无头服务器、权威场景、增量操作、物件占用、在线光标和全量快照 |
 | `src/assets.c` / `src/assets.h` | 素材库：name → id 有序索引；`Asset` 逐个 malloc 并由 entity 按 id 注册 |
 | `src/object.c` / `src/object.h` | 物件：name → id 有序索引；`Object` 逐个 malloc 并由 entity 按 id 注册，持有素材数组、层数、时间戳、位置、命中检测 |
-| `src/save.c` / `src/save.h` | 服务端存档与导入：把素材、物件、全局/物件环境和菜单写成 ZIP 结构的 `.dsk`，并支持显式导入；不保存用户私有数据 |
+| `src/save.c` / `src/save.h` | 服务端存档与导入：libzip 读写 `.dsk`，libuv 处理路径、目录和原子替换；不保存用户私有数据 |
 | `src/hjson.c` / `src/hjson.h` | 内部 HJSON 解析器：兼容标准 JSON，支持注释、无引号字段/字符串、可选逗号、根对象省略括号和多行字符串 |
 | `src/view.c` / `src/view.h` | 相机与渲染：缩放、平移、坐标转换、背景图案、按层数/时间戳排序绘制物件、选中阴影 shader |
 | `src/ui.c` / `src/ui.h` | UI：字体、菜单栏、连接对话框、文件对话框、素材/物件管理窗口、物件素材弹窗、重命名输入 |
@@ -256,7 +276,7 @@ UI 通过 `UiEvent` 把「导入素材」「新建/重命名/删除物件」「�
 
 ## 导入图片
 
-顶栏的 `导入` 按钮会直接打开系统文件对话框（使用 `zenity`，本机已安装）选择一张图片，
+顶栏的 `导入` 按钮会直接打开系统文件对话框（Linux 使用 zenity/kdialog，Windows 使用原生对话框）选择一张图片，
 图片只会加入素材库，导入成功后会自动打开素材管理窗口，不会直接出现在桌面上。
 之后通过 `物件` 新建物件，再在「管理」中加入该素材；或者直接把图片拖进窗口
 （会同时创建引用它的物件）。
@@ -410,27 +430,27 @@ UI 通过 `UiEvent` 把「导入素材」「新建/重命名/删除物件」「�
 - 服务器发现引用不一致时，会让相关客户端重新获取一次全量快照
 - 服务器把场景保存在内存中，重启后清空
 - 最多 16 个客户端，TCP 端口默认 7777
-- 当前实现使用 POSIX socket（Linux/macOS），没有鉴权，建议在可信局域网使用
+- 网络使用 libuv，Linux 和 Windows 共用同一套实现；没有鉴权，建议在可信局域网使用
 
 服务器运行在终端中，按 Ctrl+C 结束。
 
 ## 构建运行
 
 ```bash
-make
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+cmake --build build
 ./image_canvas
 ```
 
-依赖已解压在 `.deps/usr`。如果系统已安装 raylib：
+Windows 在 MSYS2 UCRT64 中执行同样的命令，生成 `image_canvas.exe`。GitHub Actions
+会构建 Linux 和 Windows 版本，并运行无头服务端冒烟测试。
 
-```bash
-make RAYLIB_DIR=/usr
-```
+服务器运行在终端中，按 Ctrl+C 结束；本地 GUI 关闭时通过 stdin 控制管道让服务端保存并退出。
 
 ## 关于 JPEG
 
 raylib 6.2 默认关闭 JPEG（和 TGA）解码，所以 Arch 官方包无法用 `LoadImage` 读取 `.jpg`。
-本项目 `.deps/usr` 里的 libraylib 已经用 JPEG 支持重新编译过：
+仓库内 `third_party/raylib` 里的 libraylib 已经用 JPEG 支持重新编译过：
 
 ```bash
 cmake -S raylib-6.2 -B build \
