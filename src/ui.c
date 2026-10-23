@@ -177,7 +177,11 @@ static int *BuildFontCodepoints (int *count) {
 
 static Font LoadAppFont (const char *name, int size) {
     char path[1024];
+#if defined(__EMSCRIPTEN__)
+    snprintf (path, sizeof (path), "/assets/%s", name);
+#else
     snprintf (path, sizeof (path), "%sassets/%s", GetApplicationDirectory (), name);
+#endif
 
     int count = 0;
     int *codepoints = BuildFontCodepoints (&count);
