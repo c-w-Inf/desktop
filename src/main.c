@@ -262,30 +262,15 @@ static void CloseAppLoop (void) {
 }
 
 static void ReleaseOwnedObjectLock (bool notify) {
-    u64 selfId = NetClientUserId ();
-    if (selfId == 0) return;
-
-    IdGroup ids = ObjectIds ();
-    for (int i = 0; i < ids.count; i++) {
-        Object *object = EntityFind (ids.ids[i]);
-        if (object == NULL || object->lockOwnerId != selfId) continue;
-        if (notify) NetUnlockObject (object->id);
-        else NetUnlockObjectSilent (object->id);
-    }
-    IdGroupUnload (&ids);
+    u64 id = NetClientLockedObjectId ();
+    if (id == 0) return;
+    if (notify) NetUnlockObject (id);
+    else NetUnlockObjectSilent (id);
 }
 
 static void ReleaseOwnedObjectLocksAndWait (void) {
-    u64 selfId = NetClientUserId ();
-    if (selfId == 0) return;
-
-    IdGroup ids = ObjectIds ();
-    for (int i = 0; i < ids.count; i++) {
-        Object *object = EntityFind (ids.ids[i]);
-        if (object != NULL && object->lockOwnerId == selfId)
-            NetUnlockObjectAndWait (object->id);
-    }
-    IdGroupUnload (&ids);
+    u64 id = NetClientLockedObjectId ();
+    if (id != 0) NetUnlockObjectAndWait (id);
 }
 
 static void ResetClientSceneState (Object **chosen, bool *dragged,

@@ -81,6 +81,8 @@ bool NetUnlockObjectSilent (u64 id);
 bool NetUnlockObjectAndWait (u64 id);
 
 u64 NetClientUserId (void);
+/* 当前客户端持有的唯一物件锁；没有锁时为 0。 */
+u64 NetClientLockedObjectId (void);
 /* 返回最近一次普通脚本 untouch 导致掉锁的物件 ID。 */
 u64 NetClientLockLostId (void);
 /* 每次客户端应用全量快照时递增，用于发现阻塞请求期间发生的场景重建。 */

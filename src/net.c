@@ -1932,6 +1932,7 @@ static u64 responseAssetId;
 static u64 responseObjectId;
 static bool responseReady;
 static u64 clientUserId;
+static u64 clientLockedId;
 static u64 pendingLockId;
 static bool lockRequestFailed;
 static u64 lockLostId;
@@ -2002,6 +2003,7 @@ static void ClientOnClosed (uv_handle_t *handle) {
     clientActive = false;
     clientClosing = false;
     clientUserId = 0;
+    clientLockedId = 0;
     pendingLockId = 0;
     lockRequestFailed = false;
     BufferFree (&clientIn);
@@ -2055,6 +2057,10 @@ static void ClientWaitClosed (int milliseconds) {
 
 u64 NetClientUserId (void) {
     return clientUserId;
+}
+
+u64 NetClientLockedObjectId (void) {
+    return clientLockedId;
 }
 
 u64 NetClientLockLostId (void) {
@@ -2554,7 +2560,10 @@ bool NetLockObject (u64 id) {
 
     Object *object = EntityFind (id);
     if (object == NULL) return false;
-    if (object->lockOwnerId == selfId) return true;
+    if (object->lockOwnerId == selfId) {
+        clientLockedId = id;
+        return true;
+    }
     if (object->lockOwnerId != 0) return false;
 
     Buffer frame = {0};
@@ -2581,6 +2590,7 @@ bool NetLockObject (u64 id) {
             return false;
         }
         if (object->lockOwnerId == selfId) {
+            clientLockedId = id;
             pendingLockId = 0;
             return true;
         }
@@ -2605,6 +2615,7 @@ static bool SendUnlockObject (u64 id, uint8_t type, bool clearLocal) {
         Object *object = EntityFind (id);
         if (object != NULL && object->lockOwnerId == NetClientUserId ())
             object->lockOwnerId = 0;
+        if (id == clientLockedId) clientLockedId = 0;
     }
 
     Buffer frame = {0};
@@ -2659,6 +2670,7 @@ static bool ApplySnapshot (const unsigned char *data, size_t length) {
     MenuSetNames (0, NULL, 0);
     AssetInit ();
     ObjectInit ();
+    clientLockedId = 0;
 
     uint32_t assetCount;
     if (!ReaderU32 (&reader, &assetCount)) return false;
@@ -2712,6 +2724,7 @@ static bool ApplySnapshot (const unsigned char *data, size_t length) {
             object->hidden = hidden != 0;
             object->lockOwnerId = lockOwnerId;
             object->assetIndex = (assetIndex < objectAssetCount) ? (int)assetIndex : 0;
+            if (lockOwnerId == clientUserId) clientLockedId = id;
         }
     }
 
@@ -2920,6 +2933,7 @@ static bool ApplyObjectDeleteDelta (Reader *reader, int *flags) {
     if (!ReaderU64 (reader, &id)) return false;
 
     Object *object = EntityFind (id);
+    if (id == clientLockedId) clientLockedId = 0;
     if (object != NULL && ObjectDelete (object)) *flags |= NET_UPDATE_DELETED;
     return true;
 }
@@ -2948,6 +2962,7 @@ static bool ApplyUserLeaveDelta (Reader *reader) {
     u64 id;
     if (!ReaderU64 (reader, &id)) return false;
     UserRemove (id);
+    if (id == clientUserId) clientLockedId = 0;
 
     IdGroup ids = ObjectIds ();
     for (int i = 0; i < ids.count; i++) {
@@ -2976,6 +2991,8 @@ static bool ApplyLockDelta (Reader *reader) {
 
     Object *object = EntityFind (id);
     if (object != NULL) object->lockOwnerId = ownerId;
+    if (ownerId == clientUserId) clientLockedId = id;
+    else if (id == clientLockedId) clientLockedId = 0;
     return true;
 }
 
@@ -2986,6 +3003,7 @@ static bool ApplyLockFailedDelta (Reader *reader, int *flags) {
         lockRequestFailed = true;
     } else {
         lockLostId = id;
+        if (id == clientLockedId) clientLockedId = 0;
         *flags |= NET_UPDATE_LOCK_LOST;
     }
     return true;
