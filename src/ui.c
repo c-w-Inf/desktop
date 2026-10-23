@@ -97,7 +97,8 @@ static bool DiscardDroppedFiles (void) {
 static bool DialogSucceeded (Ui *ui, CutilsDialogResult result,
                              const char *failure) {
     if (result == CUTILS_DIALOG_OK) return true;
-    if (result == CUTILS_DIALOG_CANCELLED) return false;
+    if (result == CUTILS_DIALOG_CANCELLED ||
+        result == CUTILS_DIALOG_PENDING) return false;
     if (result == CUTILS_DIALOG_TOO_LONG)
         UiShowError (ui, "路径过长");
     else

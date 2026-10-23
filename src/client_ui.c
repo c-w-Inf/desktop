@@ -209,6 +209,23 @@ static void DrawBusyFrame (Ui *ui, View *view, Object *chosen) {
 
 
 
+static Ui *importUi;
+
+static void ImportChosenFile (const char *path) {
+    if (path == NULL || path[0] == '\0') return;
+    if (PathHasExtension (path, ".dsk")) {
+        if (!NetRequestImport (path))
+            UiShowError (importUi, "导入请求失败");
+    } else if (PathIsImage (path)) {
+        if (!NetRequestAssetAdd (path))
+            UiShowError (importUi, "导入素材失败");
+        else
+            UiOpenAssetManager (importUi);
+    } else {
+        UiShowError (importUi, "不支持的文件");
+    }
+}
+
 void ClientFrameInit (ClientFrameState *state, Ui *ui, View *view,
                       bool localMode, int localPort, const char *localAddress,
                       ClientPumpFn pump, ClientOpenRemoteFn openRemote,
@@ -223,6 +240,8 @@ void ClientFrameInit (ClientFrameState *state, Ui *ui, View *view,
     state->openRemote = openRemote;
     state->program = program;
     state->sceneVersion = NetClientSceneVersion ();
+    importUi = ui;
+    CutilsSetFileHandler (ImportChosenFile);
     DropQueueClear ();
     if (!localMode) {
         UiSetConnectMenuVisible (ui, false);

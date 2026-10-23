@@ -209,7 +209,8 @@ else()
         -sALLOW_MEMORY_GROWTH
         -sMAXIMUM_MEMORY=2147483648
         -sFORCE_FILESYSTEM=1
-        -sENVIRONMENT=web)
+        -sENVIRONMENT=web
+        -sEXPORTED_RUNTIME_METHODS=ccall)
     if(MSVC)
         target_compile_options(image_canvas PRIVATE /W4)
     else()

@@ -6,9 +6,19 @@
 #include <string.h>
 #include <sys/stat.h>
 
+#if defined(__EMSCRIPTEN__)
+#include <emscripten.h>
+#endif
+
 #ifndef S_ISDIR
 #define S_ISDIR(mode) (((mode) & S_IFMT) == S_IFDIR)
 #endif
+
+static CutilsFileChosenFn fileHandler;
+
+void CutilsSetFileHandler (CutilsFileChosenFn handler) {
+    fileHandler = handler;
+}
 
 #if !defined(__EMSCRIPTEN__)
 #include "tinyfiledialogs.h"
@@ -39,6 +49,41 @@ static void PrepareDialogs (void) {
 }
 #endif
 
+#if defined(__EMSCRIPTEN__)
+EM_JS(void, CutilsPickImportFile, (void), {
+    const input = document.createElement("input");
+    input.type = "file";
+    input.accept = ".dsk,image/*";
+    input.style.display = "none";
+    document.body.appendChild(input);
+    input.onchange = () => {
+        const file = input.files[0];
+        if (!file) {
+            document.body.removeChild(input);
+            return;
+        }
+        const reader = new FileReader();
+        reader.onload = () => {
+            const path = "/tmp/import-" + Date.now() + "-" + file.name;
+            try {
+                FS.writeFile(path, new Uint8Array(reader.result));
+                ccall("CutilsWebFileSelected", null, ["string"], [path]);
+            } catch (error) {
+                console.error(error);
+            }
+            document.body.removeChild(input);
+        };
+        reader.readAsArrayBuffer(file);
+    };
+    input.click();
+});
+
+EMSCRIPTEN_KEEPALIVE
+void CutilsWebFileSelected (const char *path) {
+    if (fileHandler != NULL) fileHandler (path);
+}
+#endif
+
 CutilsDialogResult CutilsOpenImage (char *path, size_t size) {
 #if defined(__EMSCRIPTEN__)
     (void)path;
@@ -56,7 +101,9 @@ CutilsDialogResult CutilsOpenImport (char *path, size_t size) {
 #if defined(__EMSCRIPTEN__)
     (void)path;
     (void)size;
-    return CUTILS_DIALOG_FAILED;
+    if (fileHandler == NULL) return CUTILS_DIALOG_FAILED;
+    CutilsPickImportFile ();
+    return CUTILS_DIALOG_PENDING;
 #else
     PrepareDialogs ();
     const char *selected = tinyfd_openFileDialog (
