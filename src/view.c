@@ -13,6 +13,17 @@
 #define MAX_ZOOM 5.0f
 
 static const char *shadowVertexShader =
+#if defined(__EMSCRIPTEN__)
+    "attribute vec3 vertexPosition;\n"
+    "attribute vec2 vertexTexCoord;\n"
+    "uniform mat4 mvp;\n"
+    "varying vec2 fragTexCoord;\n"
+    "void main()\n"
+    "{\n"
+    "    fragTexCoord = vertexTexCoord;\n"
+    "    gl_Position = mvp*vec4(vertexPosition, 1.0);\n"
+    "}\n";
+#else
     "#version 330\n"
     "in vec3 vertexPosition;\n"
     "in vec2 vertexTexCoord;\n"
@@ -23,8 +34,21 @@ static const char *shadowVertexShader =
     "    fragTexCoord = vertexTexCoord;\n"
     "    gl_Position = mvp*vec4(vertexPosition, 1.0);\n"
     "}\n";
+#endif
 
 static const char *shadowFragmentShader =
+#if defined(__EMSCRIPTEN__)
+    "precision mediump float;\n"
+    "varying vec2 fragTexCoord;\n"
+    "uniform sampler2D texture0;\n"
+    "uniform vec4 shadowColor;\n"
+    "void main()\n"
+    "{\n"
+    "    float alpha = texture2D(texture0, fragTexCoord).a;\n"
+    "    float full = (alpha >= 1.0) ? 1.0 : 0.0;\n"
+    "    gl_FragColor = vec4(shadowColor.rgb, full*shadowColor.a);\n"
+    "}\n";
+#else
     "#version 330\n"
     "in vec2 fragTexCoord;\n"
     "uniform sampler2D texture0;\n"
@@ -36,6 +60,7 @@ static const char *shadowFragmentShader =
     "    float full = (alpha >= 1.0) ? 1.0 : 0.0;\n"
     "    finalColor = vec4(shadowColor.rgb, full*shadowColor.a);\n"
     "}\n";
+#endif
 
 void ViewInit (View *view) {
     // offset 固定在窗口中心，target 表示窗口中心对应的世界坐标
