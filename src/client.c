@@ -1,725 +1,1076 @@
-#include "client.h"
+#define _GNU_SOURCE
 
+#include "net.h"
+#include "net_common.h"
+#include "netutils.h"
+#include "ui.h"
+#include "utils.h"
+
+#include <errno.h>
+#include <limits.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
 #include "raylib.h"
-#include "raymath.h"
 #include "assets.h"
-#include "entity.h"
 #include "menu.h"
-#include "net.h"
 #include "object.h"
+#include "entity.h"
 #include "user.h"
-#include "utils.h"
 
-static void ReleaseOwnedObjectLock (bool notify) {
-    u64 id = NetClientLockedObjectId ();
-    if (id == 0) return;
-    if (notify) NetUnlockObject (id);
-    else NetUnlockObjectSilent (id);
+static NetutilStream *clientStream;
+static bool clientActive;
+static bool clientClosing;
+static bool clientConnectDone;
+static bool clientConnectOk;
+static Buffer clientIn;
+static int clientPendingFlags;
+static u64 nextRequestId = 1;
+static u64 objectRequestId;
+static u64 clientUserId;
+static u64 clientLockedId;
+static u64 pendingLockId;
+static NetLockDoneFn lockDone;
+static int lockResult;
+static double lockStarted;
+static double lockTimeout;
+static u64 lockLostId;
+static u64 clientSceneVersion;
+
+static bool ParseClientFrames (int *flags);
+static void ClientCloseNow (void);
+static void ClientOnConnected (NetutilStream *stream, void *user);
+static void ClientOnRead (NetutilStream *stream, const unsigned char *data,
+                          size_t size, void *user);
+static void ClientOnClosed (NetutilStream *stream, void *user);
+
+static const NetutilEvents clientEvents = {
+    ClientOnConnected, ClientOnRead, ClientOnClosed, NULL
+};
+
+static void ClientPump (int milliseconds) {
+    NetutilPump (milliseconds);
 }
 
-static void ResetClientSceneState (Object **chosen, bool *dragged,
-                                    bool *dragMoved, bool *suppress,
-                                    u64 *lastClickId, double *lastClickTime,
-                                    Ui *ui) {
-    ReleaseOwnedObjectLock (false);
-    *chosen = NULL;
-    *dragged = false;
-    *dragMoved = false;
-    *suppress = IsMouseButtonDown (MOUSE_BUTTON_LEFT);
-    *lastClickId = 0;
-    *lastClickTime = 0.0;
-    UiResetSceneState (ui);
+static void ClientOnConnected (NetutilStream *stream, void *user) {
+    (void)stream;
+    (void)user;
+    clientConnectDone = true;
+    clientConnectOk = true;
+    clientActive = true;
+    clientClosing = false;
 }
 
-static bool ObjectLockedBySelf (const Object *object) {
-    if (object == NULL || object->lockOwnerId == 0) return false;
-    return object->lockOwnerId == NetClientUserId ();
+static void ClientOnRead (NetutilStream *stream, const unsigned char *data,
+                          size_t size, void *user) {
+    (void)stream;
+    (void)user;
+    if (clientIn.len + size > NET_MAX_FRAME + 4 ||
+        !BufferAppend (&clientIn, data, size)) {
+        ClientCloseNow ();
+        return;
+    }
+    int flags = NET_UPDATE_NONE;
+    if (!ParseClientFrames (&flags)) {
+        ClientCloseNow ();
+        return;
+    }
+    clientPendingFlags |= flags;
+    if (flags & NET_UPDATE_REJECTED) ClientCloseNow ();
 }
 
-static void BringObjectToFront (Object *object) {
-    if (object == NULL || !ObjectLockedBySelf (object)) return;
-    NetRequestObjectFront (object->id);
+static void ClientOnClosed (NetutilStream *stream, void *user) {
+    (void)stream;
+    (void)user;
+    clientStream = NULL;
+    clientActive = false;
+    clientClosing = false;
+    clientConnectDone = true;
+    clientConnectOk = false;
+    clientUserId = 0;
+    clientLockedId = 0;
+    pendingLockId = 0;
+    objectRequestId = 0;
+    lockDone = NULL;
+    lockResult = 0;
+    BufferFree (&clientIn);
 }
 
-
-static bool SceneIsEmpty (void) {
-    IdGroup assets = AssetIds ();
-    IdGroup objects = ObjectIds ();
-    bool empty = assets.count == 0 && objects.count == 0;
-    IdGroupUnload (&assets);
-    IdGroupUnload (&objects);
-    return empty;
+static void ClientCloseNow (void) {
+    if (clientStream != NULL) {
+        clientClosing = true;
+        NetutilClose (clientStream);
+    } else {
+        clientActive = false;
+        clientClosing = false;
+        BufferFree (&clientIn);
+    }
+    clientUserId = 0;
+    pendingLockId = 0;
+    objectRequestId = 0;
+    lockDone = NULL;
+    lockResult = 0;
 }
 
-static int AssetIndexAfterRemove (int current, int removed, int count) {
-    if (removed < current) return current - 1;
-    if (removed > current) return current;
-    if (current >= count - 1) return count > 1 ? count - 2 : 0;
-    return current;
+static void ClientWaitClosed (int milliseconds) {
+    for (int elapsed = 0; elapsed < milliseconds && clientStream != NULL;
+         elapsed++)
+        NetutilPump (1);
 }
 
-static bool SendObjectState (const Object *object, const char *name, int layer,
-                             const IdGroup *assets, int assetIndex) {
-    Object copy = *object;
-    if (name != NULL) snprintf (copy.name, sizeof (copy.name), "%s", name);
-    copy.layer = layer;
-    copy.assets = *assets;
-    copy.assetIndex = assetIndex;
-    ObjectTouch (&copy);
-    return NetPublishObjectUpsert (&copy);
+u64 NetClientUserId (void) {
+    return clientUserId;
 }
 
+u64 NetClientLockedObjectId (void) {
+    return clientLockedId;
+}
 
-static bool SendObjectAssetAdd (const Object *object, u64 assetId) {
-    IdGroup assets = IdGroupCreate ();
-    if (!IdGroupCopy (&assets, object->assets.ids, object->assets.count) ||
-        !IdGroupAdd (&assets, assetId)) {
-        IdGroupUnload (&assets);
+bool NetClientLockPending (void) {
+    return lockDone != NULL;
+}
+
+u64 NetClientLockLostId (void) {
+    return lockLostId;
+}
+
+u64 NetClientSceneVersion (void) {
+    return clientSceneVersion;
+}
+
+static bool ClientSendFrame (Buffer *frame) {
+    if (!clientActive || clientClosing || clientStream == NULL ||
+        frame->len > NET_MAX_OUTPUT) {
+        BufferFree (frame);
         return false;
     }
-    bool ok = SendObjectState (object, NULL, object->layer, &assets,
-                               object->assetIndex);
-    IdGroupUnload (&assets);
+    bool ok = NetutilWrite (clientStream, frame->data, frame->len);
+    BufferFree (frame);
     return ok;
 }
 
-static bool SendObjectAssetRemove (const Object *object, int index) {
-    IdGroup assets = IdGroupCreate ();
-    if (!IdGroupCopy (&assets, object->assets.ids, object->assets.count) ||
-        !IdGroupRemoveAt (&assets, index)) {
-        IdGroupUnload (&assets);
+bool NetClientConnect (const char *host, int port, const char *username) {
+    if (username == NULL || username[0] == '\0') return false;
+    ClientCloseNow ();
+    ClientWaitClosed (1000);
+    if (clientStream != NULL) return false;
+    UserUnload ();
+    clientPendingFlags = NET_UPDATE_NONE;
+    nextRequestId = 1;
+    objectRequestId = 0;
+    pendingLockId = 0;
+    clientUserId = 0;
+    clientLockedId = 0;
+
+    if (!NetutilInit ()) return false;
+    NetutilAddress address = {host, (uint16_t)port};
+    clientConnectDone = false;
+    clientConnectOk = false;
+    if (!NetutilConnect (&address, &clientEvents, NULL, &clientStream))
+        return false;
+
+    for (int elapsed = 0; !clientConnectDone && elapsed < 5000; elapsed++)
+        NetutilPump (1);
+    if (!clientConnectDone || !clientConnectOk) {
+        ClientCloseNow ();
+        ClientWaitClosed (1000);
         return false;
     }
-    int assetIndex = AssetIndexAfterRemove (object->assetIndex, index,
-                                            object->assets.count);
-    bool ok = SendObjectState (object, NULL, object->layer, &assets, assetIndex);
-    IdGroupUnload (&assets);
-    return ok;
-}
 
-static bool SendObjectAssetMove (const Object *object, int from, int to) {
-    IdGroup assets = IdGroupCreate ();
-    if (!IdGroupCopy (&assets, object->assets.ids, object->assets.count) ||
-        !IdGroupMove (&assets, from, to)) {
-        IdGroupUnload (&assets);
+    clientActive = true;
+    clientClosing = false;
+    Buffer payload = {0};
+    Buffer frame = {0};
+    bool ok = BufferPutString (&payload, username) &&
+              FrameMake (&frame, NET_HELLO, &payload);
+    BufferFree (&payload);
+    if (!ok || !ClientSendFrame (&frame)) {
+        ClientCloseNow ();
+        ClientWaitClosed (1000);
         return false;
     }
-    bool ok = SendObjectState (object, NULL, object->layer, &assets,
-                               object->assetIndex);
-    IdGroupUnload (&assets);
-    return ok;
-}
-
-static void DrawNetCursors (const Ui *ui, const View *view) {
-    u64 selfId = NetClientUserId ();
-    IdGroup ids = UserIds ();
-    for (int i = 0; i < ids.count; i++) {
-        User *user = EntityFind (ids.ids[i]);
-        if (user == NULL || !user->hasCursor || user->id == selfId) continue;
-
-        Vector2 screen = GetWorldToScreen2D ((Vector2){user->x, user->y}, view->cam);
-        Color color = UserColor (user);
-        DrawCircleV (screen, 4.0f, color);
-        DrawTextEx (ui->font, user->name, (Vector2){screen.x + 7.0f, screen.y + 4.0f},
-                    20.0f, 0.0f, color);
-    }
-    IdGroupUnload (&ids);
-}
-
-typedef struct {
-    char *path;
-    Vector2 position;
-} DropItem;
-
-static DropItem *dropItems;
-static int dropCount;
-static int dropCapacity;
-static bool dropInProgress;
-static bool lockEventReady;
-static bool lockEventAcquired;
-
-static void OnLockDone (bool acquired) {
-    lockEventReady = true;
-    lockEventAcquired = acquired;
-}
-
-static void DropQueueClear (void) {
-    for (int i = 0; i < dropCount; i++) free (dropItems[i].path);
-    free (dropItems);
-    dropItems = NULL;
-    dropCount = 0;
-    dropCapacity = 0;
-}
-
-static bool DropQueuePush (const char *path, Vector2 position) {
-    if (dropCount == dropCapacity) {
-        int capacity = dropCapacity == 0 ? 8 : dropCapacity * 2;
-        DropItem *items = realloc (dropItems, (size_t)capacity * sizeof (*items));
-        if (items == NULL) return false;
-        dropItems = items;
-        dropCapacity = capacity;
-    }
-    dropItems[dropCount].path = StrDup (path);
-    if (dropItems[dropCount].path == NULL) return false;
-    dropItems[dropCount].position = position;
-    dropCount++;
     return true;
 }
 
-static void DrawBusySpinner (const Ui *ui) {
-    float x = GetScreenWidth () - 34.0f;
-    float y = GetScreenHeight () - 38.0f;
-    float angle = (float)(GetTime () * 240.0);
-    DrawRing ((Vector2){x, y}, 11.0f, 14.0f, angle, angle + 260.0f,
-              24, (Color){40, 90, 180, 255});
-    const char *text = "处理中";
-    Vector2 size = MeasureTextEx (ui->font, text, 16.0f, 0.0f);
-    DrawTextEx (ui->font, text, (Vector2){x - size.x - 10.0f, y - size.y * 0.5f},
-                16.0f, 0.0f, (Color){40, 90, 180, 255});
+bool NetClientConnected (void) {
+    return clientStream != NULL && clientActive && !clientClosing;
 }
 
-static void StartNextDrop (void) {
-    while (dropCount > 0) {
-        DropItem item = dropItems[0];
-        dropItems[0] = dropItems[--dropCount];
-        if (NetRequestAssetObject (item.path, item.position, OnLockDone)) {
-            free (item.path);
-            dropInProgress = true;
-            return;
+void NetClientDisconnect (void) {
+    ClientCloseNow ();
+}
+
+bool NetRequestObjectCreate (Vector2 center, NetLockDoneFn done) {
+    if (clientLockedId != 0) NetUnlockObject (clientLockedId);
+    u64 requestId = nextRequestId++;
+    objectRequestId = requestId;
+    lockDone = done;
+    lockResult = 0;
+    pendingLockId = 0;
+    lockStarted = GetTime ();
+    lockTimeout = 30.0;
+
+    u64 timestamp = (u64)(GetTime () * 1000000.0);
+    if (timestamp == 0) timestamp = 1;
+
+    Buffer payload = {0};
+    Buffer frame = {0};
+    bool ok = BufferPutU64 (&payload, requestId) &&
+              BufferPutString (&payload, "object") &&
+              BufferPutF32 (&payload, center.x) &&
+              BufferPutF32 (&payload, center.y) &&
+              BufferPutU32 (&payload, 0) &&
+              BufferPutU64 (&payload, timestamp) &&
+              BufferPutU32 (&payload, 0) &&
+              FrameMake (&frame, NET_REQ_OBJECT_CREATE, &payload);
+    BufferFree (&payload);
+    if (!ok) {
+        BufferFree (&frame);
+        lockDone = NULL;
+        return false;
+    }
+    if (!ClientSendFrame (&frame)) {
+        lockDone = NULL;
+        return false;
+    }
+    return true;
+}
+
+bool NetRequestAssetRename (u64 id, const char *name) {
+    if (id == 0 || name == NULL || name[0] == '\0') return false;
+    Buffer frame = {0};
+    if (!FrameAssetRename (&frame, id, name)) {
+        BufferFree (&frame);
+        return false;
+    }
+    return ClientSendFrame (&frame);
+}
+
+bool NetRequestAssetReplace (u64 id, const char *ext,
+                             const unsigned char *data, int size) {
+    if (id == 0 || ext == NULL || ext[0] == '\0' || data == NULL ||
+        size <= 0 || (uint32_t)size > NET_MAX_FRAME) return false;
+
+    Image image = LoadImageFromMemory (ext, data, size);
+    if (!IsImageValid (image)) {
+        UnloadImage (image);
+        return false;
+    }
+    UnloadImage (image);
+
+    Buffer frame = {0};
+    if (!FrameAssetReplace (&frame, id, ext, data, (uint32_t)size)) {
+        BufferFree (&frame);
+        return false;
+    }
+    return ClientSendFrame (&frame);
+}
+
+bool NetRequestAssetDelete (u64 id) {
+    Buffer frame = {0};
+    if (!FrameAssetDelete (&frame, id)) {
+        BufferFree (&frame);
+        return false;
+    }
+    return ClientSendFrame (&frame);
+}
+
+bool NetPublishObjectUpsert (const Object *object) {
+    if (object == NULL) return false;
+
+    Buffer frame = {0};
+    bool ok = FrameObjectUpsert (&frame, object->id, object->name, object->pos.x, object->pos.y,
+                                 object->layer, object->timestamp, object->hidden,
+                                 (uint32_t)object->assetIndex,
+                                 object->assets.ids, (uint32_t)object->assets.count);
+    if (!ok) {
+        BufferFree (&frame);
+        return false;
+    }
+    return ClientSendFrame (&frame);
+}
+
+bool NetRequestScript (const char *source, const char *selfExpr) {
+    if (source == NULL) return false;
+    if (selfExpr == NULL) selfExpr = "";
+    if (strlen (source) > 0xFFFFu || strlen (selfExpr) > 0xFFFFu) return false;
+
+    Buffer payload = {0};
+    Buffer frame = {0};
+    bool ok = BufferPutString (&payload, source) &&
+              BufferPutString (&payload, selfExpr) &&
+              FrameMake (&frame, NET_REQ_SCRIPT, &payload);
+    BufferFree (&payload);
+    if (!ok) {
+        BufferFree (&frame);
+        return false;
+    }
+    return ClientSendFrame (&frame);
+}
+
+bool NetRequestMenu (u64 id, int index, const char *name) {
+    if (index < 0 || name == NULL || strlen (name) > 0xFFFFu)
+        return false;
+
+    Buffer frame = {0};
+    if (!FrameMenuRequest (&frame, id, (uint32_t)index, name)) {
+        BufferFree (&frame);
+        return false;
+    }
+    return ClientSendFrame (&frame);
+}
+
+bool NetRequestImport (const char *path) {
+    if (path == NULL || path[0] == '\0' || strlen (path) > 0xFFFFu)
+        return false;
+
+    Buffer payload = {0};
+    Buffer frame = {0};
+    bool ok = BufferPutString (&payload, path) &&
+              FrameMake (&frame, NET_REQ_IMPORT, &payload);
+    BufferFree (&payload);
+    if (!ok) {
+        BufferFree (&frame);
+        return false;
+    }
+    return ClientSendFrame (&frame);
+}
+
+bool NetRequestExport (const char *path) {
+    if (path == NULL || path[0] == '\0' || strlen (path) > 0xFFFFu)
+        return false;
+
+    Buffer payload = {0};
+    Buffer frame = {0};
+    bool ok = BufferPutString (&payload, path) &&
+              FrameMake (&frame, NET_REQ_EXPORT, &payload);
+    BufferFree (&payload);
+    if (!ok) {
+        BufferFree (&frame);
+        return false;
+    }
+    return ClientSendFrame (&frame);
+}
+
+bool NetRequestObjectFront (u64 id) {
+    Object *object = EntityFind (id);
+    if (object == NULL || object->lockOwnerId != NetClientUserId ()) return false;
+
+    Buffer frame = {0};
+    if (!FrameObjectLock (&frame, NET_REQ_OBJECT_FRONT, id)) {
+        BufferFree (&frame);
+        return false;
+    }
+    return ClientSendFrame (&frame);
+}
+
+bool NetRequestDragUpdate (u64 id) {
+    if (id == 0) return false;
+    Buffer frame = {0};
+    if (!FrameObjectLock (&frame, NET_DRAG_UPDATE, id)) {
+        BufferFree (&frame);
+        return false;
+    }
+    return ClientSendFrame (&frame);
+}
+
+bool NetRequestDragEnd (u64 id) {
+    if (id == 0) return false;
+    Buffer frame = {0};
+    if (!FrameObjectLock (&frame, NET_DRAG_END, id)) {
+        BufferFree (&frame);
+        return false;
+    }
+    return ClientSendFrame (&frame);
+}
+
+bool NetRequestObjectDelete (u64 id) {
+    Buffer frame = {0};
+    if (!FrameObjectDelete (&frame, id)) {
+        BufferFree (&frame);
+        return false;
+    }
+    return ClientSendFrame (&frame);
+}
+
+
+bool NetRequestAssetAdd (const char *path) {
+    int size = 0;
+    unsigned char *data = ReadFileBytes (path, &size);
+    if (data == NULL || size <= 0) {
+        free (data);
+        return false;
+    }
+
+    const char *ext = GetFileExtension (path);
+    Image image = LoadImageFromMemory (ext, data, size);
+    if (image.data == NULL) {
+        free (data);
+        return false;
+    }
+    UnloadImage (image);
+
+    u64 requestId = nextRequestId++;
+
+    Buffer payload = {0};
+    Buffer frame = {0};
+    bool ok = BufferPutU64 (&payload, requestId) &&
+              BufferPutString (&payload, "asset") &&
+              BufferPutString (&payload, ext) &&
+              BufferPutU32 (&payload, (uint32_t)size) &&
+              BufferAppend (&payload, data, (size_t)size) &&
+              FrameMake (&frame, NET_REQ_ASSET_ADD, &payload);
+    BufferFree (&payload);
+    free (data);
+    if (!ok) {
+        BufferFree (&frame);
+        return false;
+    }
+    if (!ClientSendFrame (&frame)) {
+        return false;
+    }
+    return true;
+}
+
+bool NetRequestAssetObject (const char *path, Vector2 position,
+                            NetLockDoneFn done) {
+    if (clientLockedId != 0) NetUnlockObject (clientLockedId);
+    int size = 0;
+    unsigned char *data = ReadFileBytes (path, &size);
+    if (data == NULL || size <= 0) {
+        free (data);
+        return false;
+    }
+
+    const char *ext = GetFileExtension (path);
+    Image image = LoadImageFromMemory (ext, data, size);
+    if (image.data == NULL) {
+        free (data);
+        return false;
+    }
+    UnloadImage (image);
+
+    u64 requestId = nextRequestId++;
+    objectRequestId = requestId;
+    lockDone = done;
+    lockResult = 0;
+    pendingLockId = 0;
+    lockStarted = GetTime ();
+    lockTimeout = 30.0;
+
+    u64 timestamp = (u64)(GetTime () * 1000000.0);
+    if (timestamp == 0) timestamp = 1;
+
+    Buffer payload = {0};
+    Buffer frame = {0};
+    bool ok = BufferPutU64 (&payload, requestId) &&
+              BufferPutString (&payload, "asset") &&
+              BufferPutString (&payload, ext) &&
+              BufferPutU32 (&payload, (uint32_t)size) &&
+              BufferAppend (&payload, data, (size_t)size) &&
+              BufferPutString (&payload, "object") &&
+              BufferPutF32 (&payload, position.x) &&
+              BufferPutF32 (&payload, position.y) &&
+              BufferPutU32 (&payload, 0) &&
+              BufferPutU64 (&payload, timestamp) &&
+              FrameMake (&frame, NET_REQ_ASSET_OBJECT, &payload);
+    BufferFree (&payload);
+    free (data);
+    if (!ok) {
+        BufferFree (&frame);
+        lockDone = NULL;
+        return false;
+    }
+    if (!ClientSendFrame (&frame)) {
+        lockDone = NULL;
+        return false;
+    }
+    return true;
+}
+
+bool NetPublishCursor (Vector2 worldPos) {
+    Buffer frame = {0};
+    if (!FrameCursor (&frame, worldPos.x, worldPos.y)) {
+        BufferFree (&frame);
+        return false;
+    }
+    return ClientSendFrame (&frame);
+}
+
+
+bool NetRequestLock (u64 id, NetLockDoneFn done) {
+    u64 selfId = NetClientUserId ();
+    if (selfId == 0 || id == 0) return false;
+
+    Object *object = EntityFind (id);
+    if (object == NULL) return false;
+    if (object->lockOwnerId == selfId) {
+        clientLockedId = id;
+        lockDone = done;
+        pendingLockId = id;
+        lockResult = 1;
+        lockStarted = GetTime ();
+        lockTimeout = 0.0;
+        return true;
+    }
+    if (object->lockOwnerId != 0) return false;
+    if (clientLockedId != 0 && clientLockedId != id)
+        NetUnlockObject (clientLockedId);
+
+    Buffer frame = {0};
+    if (!FrameObjectLock (&frame, NET_LOCK, id)) {
+        BufferFree (&frame);
+        return false;
+    }
+    pendingLockId = id;
+    lockDone = done;
+    lockResult = 0;
+    lockStarted = GetTime ();
+    lockTimeout = 2.0;
+    if (!ClientSendFrame (&frame)) {
+        pendingLockId = 0;
+        lockDone = NULL;
+        return false;
+    }
+    return true;
+}
+
+static bool SendUnlockObject (u64 id, uint8_t type, bool clearLocal) {
+    if (clearLocal) {
+        Object *object = EntityFind (id);
+        if (object != NULL && object->lockOwnerId == NetClientUserId ())
+            object->lockOwnerId = 0;
+        if (id == clientLockedId) clientLockedId = 0;
+    }
+
+    Buffer frame = {0};
+    if (!FrameObjectLock (&frame, type, id)) {
+        BufferFree (&frame);
+        return false;
+    }
+    return ClientSendFrame (&frame);
+}
+
+bool NetUnlockObject (u64 id) {
+    return SendUnlockObject (id, NET_UNLOCK_NOTIFY, true);
+}
+
+bool NetUnlockObjectSilent (u64 id) {
+    return SendUnlockObject (id, NET_UNLOCK, true);
+}
+
+
+static bool ApplySnapshot (const unsigned char *data, size_t length) {
+    Reader reader = {data, length, 0};
+    uint32_t version;
+    u64 selfId;
+    if (!ReaderU32 (&reader, &version) || version != NET_PROTOCOL_VERSION ||
+        !ReaderU64 (&reader, &selfId)) return false;
+    clientUserId = selfId;
+    clientSceneVersion++;
+
+    AssetUnload ();
+    ObjectUnload ();
+    UserUnload ();
+    MenuSetNames (0, NULL, 0);
+    AssetInit ();
+    ObjectInit ();
+    clientLockedId = 0;
+
+    uint32_t assetCount;
+    if (!ReaderU32 (&reader, &assetCount)) return false;
+
+    for (uint32_t i = 0; i < assetCount; i++) {
+        u64 id;
+        char name[256];
+        char ext[8];
+        uint32_t size;
+        if (!ReaderU64 (&reader, &id) || !ReaderString (&reader, name, sizeof (name)) ||
+            !ReaderString (&reader, ext, sizeof (ext)) || !ReaderU32 (&reader, &size) ||
+            size == 0 || size > NET_MAX_FRAME || !ReaderAvailable (&reader, size))
+            return false;
+
+        AssetAdd (name, ext, reader.data + reader.pos, (int)size, id);
+        reader.pos += size;
+    }
+
+    uint32_t objectCount;
+    if (!ReaderU32 (&reader, &objectCount)) return false;
+
+    for (uint32_t i = 0; i < objectCount; i++) {
+        u64 id;
+        char name[256];
+        float x, y;
+        uint32_t layer;
+        u64 timestamp;
+        uint8_t hidden;
+        uint32_t objectAssetCount;
+        uint32_t assetIndex;
+        if (!ReaderU64 (&reader, &id) || !ReaderString (&reader, name, sizeof (name)) ||
+            !ReaderF32 (&reader, &x) || !ReaderF32 (&reader, &y) ||
+            !ReaderU32 (&reader, &layer) || !ReaderU64 (&reader, &timestamp) ||
+            !ReaderBytes (&reader, &hidden, 1) ||
+            !ReaderU32 (&reader, &objectAssetCount) ||
+            !ReaderU32 (&reader, &assetIndex) ||
+            !ReaderAvailable (&reader, (size_t)objectAssetCount * 8)) return false;
+
+        Object *object = ObjectAdd (
+            name, (Vector2){x, y}, (int)(int32_t)layer, timestamp, id);
+        for (uint32_t a = 0; a < objectAssetCount; a++) {
+            u64 assetId;
+            if (!ReaderU64 (&reader, &assetId)) return false;
+            if (object != NULL) IdGroupAdd (&object->assets, assetId);
         }
-        free (item.path);
-    }
-    dropInProgress = false;
-}
 
-static void DrawBusyFrame (Ui *ui, View *view, Object *chosen) {
-    BeginDrawing ();
-    ClearBackground (WHITE);
-    ViewDraw (view, chosen, ui->font);
-    DrawNetCursors (ui, view);
-    UiDraw (ui);
-    DrawBusySpinner (ui);
-    EndDrawing ();
-}
-
-
-int ClientRun (Ui *ui, View *view, bool localMode, int localPort,
-               const char *localAddress, ClientPumpFn pump,
-               ClientOpenRemoteFn openRemote, const char *program) {
-    if (!localMode) {
-        UiSetConnectMenuVisible (ui, false);
-        UiSetFileMenuVisible (ui, false);
+        u64 lockOwnerId;
+        if (!ReaderU64 (&reader, &lockOwnerId)) return false;
+        if (object != NULL) {
+            object->timestamp = timestamp;
+            object->hidden = hidden != 0;
+            object->lockOwnerId = lockOwnerId;
+            object->assetIndex = (assetIndex < objectAssetCount) ? (int)assetIndex : 0;
+            if (lockOwnerId == clientUserId) clientLockedId = id;
+        }
     }
 
-    Object *chosen = NULL;
-    bool dragged = false;
-    bool dragMoved = false;
-    bool suppressCanvasInput = false;
-    Vector2 grab = {0};
-    double lastCursorSend = 0.0;
-    double lastObjectSync = 0.0;
-    u64 lastCanvasClickId = 0;
-    double lastCanvasClickTime = 0.0;
-    bool closeAfterConnect = false;
-    u64 sceneVersion = NetClientSceneVersion ();
+    uint32_t userCount;
+    if (!ReaderU32 (&reader, &userCount)) return false;
+    for (uint32_t i = 0; i < userCount; i++) {
+        u64 id;
+        char username[128];
+        uint32_t color;
+        uint8_t canscript;
+        uint8_t hasCursor;
+        float x, y;
+        if (!ReaderU64 (&reader, &id) ||
+            !ReaderString (&reader, username, sizeof (username)) ||
+            !ReaderU32 (&reader, &color) ||
+            !ReaderBytes (&reader, &canscript, 1) ||
+            !ReaderBytes (&reader, &hasCursor, 1) ||
+            !ReaderF32 (&reader, &x) || !ReaderF32 (&reader, &y)) return false;
+        UserAdd (id, username);
+        UserSetColor (id, color);
+        UserSetCanScript (id, canscript != 0);
+        UserSetCursor (id, hasCursor != 0, x, y);
+    }
 
-    while (1) {
-        bool closeRequested = WindowShouldClose ();
-        pump ();
+    return reader.pos == reader.len;
+}
 
-        ViewUpdateViewport (view);
+static bool ApplyAssetAddDelta (Reader *reader) {
+    u64 requestId;
+    u64 requesterId;
+    u64 id;
+    char name[256];
+    char ext[8];
+    uint32_t size;
+    if (!ReaderU64 (reader, &requestId) ||
+        !ReaderU64 (reader, &requesterId) ||
+        !ReaderU64 (reader, &id) ||
+        !ReaderString (reader, name, sizeof (name)) ||
+        !ReaderString (reader, ext, sizeof (ext)) || !ReaderU32 (reader, &size) ||
+        size == 0 || size > NET_MAX_FRAME || !ReaderAvailable (reader, size))
+        return false;
 
-        bool wasPending = NetClientLockPending ();
-        int update = NetClientUpdate ();
-        if (update & NET_UPDATE_REJECTED) {
+    Asset *existing = EntityFind (id);
+    if (existing == NULL)
+        existing = AssetAdd (name, ext, reader->data + reader->pos, (int)size, id);
+    reader->pos += size;
+
+    return true;
+}
+
+static bool ApplyAssetRenameDelta (Reader *reader) {
+    u64 id;
+    char name[256];
+    if (!ReaderU64 (reader, &id) || !ReaderString (reader, name, sizeof (name)))
+        return false;
+
+    Asset *asset = EntityFind (id);
+    if (asset != NULL && strcmp (asset->name, name) != 0)
+        AssetRename (asset, name);
+    return true;
+}
+
+static bool ApplyAssetReplaceDelta (Reader *reader) {
+    u64 id;
+    char ext[8];
+    uint32_t size;
+    if (!ReaderU64 (reader, &id) || !ReaderString (reader, ext, sizeof (ext)) ||
+        !ReaderU32 (reader, &size) || size == 0 || size > NET_MAX_FRAME ||
+        !ReaderAvailable (reader, size)) return false;
+
+    Asset *asset = EntityFind (id);
+    if (asset != NULL) {
+        bool same = (asset->fileSize == (int)size) && (strcmp (asset->ext, ext) == 0) &&
+                    asset->fileData != NULL &&
+                    memcmp (asset->fileData, reader->data + reader->pos, size) == 0;
+        if (!same) AssetReplace (asset, ext, reader->data + reader->pos, (int)size);
+    }
+    reader->pos += size;
+    return true;
+}
+
+static bool ApplyAssetDeleteFailedDelta (Reader *reader, int *flags) {
+    u64 id;
+    if (!ReaderU64 (reader, &id)) return false;
+    (void)id;
+    *flags |= NET_UPDATE_ASSET_DELETE_FAILED;
+    return true;
+}
+
+static bool ApplyAssetDeleteDelta (Reader *reader, int *flags) {
+    u64 id;
+    if (!ReaderU64 (reader, &id)) return false;
+
+    Asset *asset = EntityFind (id);
+    if (asset != NULL) {
+        IdGroup ids = ObjectIds ();
+        for (int i = 0; i < ids.count; i++) {
+            Object *object = EntityFind (ids.ids[i]);
+            if (object == NULL) continue;
+            for (int a = object->assets.count - 1; a >= 0; a--) {
+                if (object->assets.ids[a] == id) IdGroupRemoveAt (&object->assets, a);
+            }
+        }
+        IdGroupUnload (&ids);
+        if (AssetDelete (asset)) *flags |= NET_UPDATE_ASSET_DELETED;
+    }
+    return true;
+}
+
+static bool ApplyObjectState (Reader *reader, u64 id, const char *name,
+                              float x, float y, uint32_t layer, u64 timestamp,
+                              bool hidden, uint32_t assetIndex, uint32_t assetCount,
+                              Object **result) {
+    Object *object = EntityFind (id);
+    if (object == NULL) {
+        object = ObjectAdd (name, (Vector2){x, y},
+                            (int)(int32_t)layer, timestamp, id);
+    } else {
+        if (strcmp (object->name, name) != 0) ObjectRename (object, name);
+        object->pos = (Vector2){x, y};
+        object->layer = (int)(int32_t)layer;
+    }
+
+    if (object != NULL) {
+        IdGroupClear (&object->assets);
+        for (uint32_t i = 0; i < assetCount; i++) {
+            u64 assetId;
+            if (!ReaderU64 (reader, &assetId)) return false;
+            if (EntityFind (assetId) != NULL) IdGroupAdd (&object->assets, assetId);
+        }
+        object->timestamp = timestamp;
+        object->hidden = hidden;
+        object->assetIndex = (assetIndex < (uint32_t)object->assets.count)
+                                 ? (int)assetIndex : 0;
+    } else {
+        for (uint32_t i = 0; i < assetCount; i++) {
+            u64 assetId;
+            if (!ReaderU64 (reader, &assetId)) return false;
+        }
+    }
+    *result = object;
+    return true;
+}
+
+static bool ApplyObjectCreatedDelta (Reader *reader, int *flags) {
+    (void)flags;
+    u64 requestId;
+    u64 requesterId;
+    u64 id;
+    char name[256];
+    float x, y;
+    uint32_t layer;
+    u64 timestamp;
+    uint8_t hidden;
+    uint32_t assetIndex;
+    uint32_t assetCount;
+    if (!ReaderU64 (reader, &requestId) ||
+        !ReaderU64 (reader, &requesterId) ||
+        !ReaderU64 (reader, &id) ||
+        !ReaderString (reader, name, sizeof (name)) ||
+        !ReaderF32 (reader, &x) || !ReaderF32 (reader, &y) ||
+        !ReaderU32 (reader, &layer) || !ReaderU64 (reader, &timestamp) ||
+        !ReaderBytes (reader, &hidden, 1) ||
+        !ReaderU32 (reader, &assetCount) || !ReaderU32 (reader, &assetIndex) ||
+        !ReaderAvailable (reader, (size_t)assetCount * 8)) return false;
+
+    Object *object = NULL;
+    if (!ApplyObjectState (reader, id, name, x, y, layer, timestamp,
+                           hidden != 0, assetIndex, assetCount, &object)) return false;
+
+    if (requestId != 0 && requestId == objectRequestId && object != NULL &&
+        requesterId == NetClientUserId ()) {
+        objectRequestId = 0;
+        if (lockDone != NULL) pendingLockId = id;
+    }
+    return true;
+}
+
+static bool ApplyObjectUpsertDelta (Reader *reader) {
+    u64 id;
+    char name[256];
+    float x, y;
+    uint32_t layer;
+    u64 timestamp;
+    uint8_t hidden;
+    uint32_t assetIndex;
+    uint32_t assetCount;
+    if (!ReaderU64 (reader, &id) || !ReaderString (reader, name, sizeof (name)) ||
+        !ReaderF32 (reader, &x) || !ReaderF32 (reader, &y) ||
+        !ReaderU32 (reader, &layer) || !ReaderU64 (reader, &timestamp) ||
+        !ReaderBytes (reader, &hidden, 1) ||
+        !ReaderU32 (reader, &assetCount) || !ReaderU32 (reader, &assetIndex) ||
+        !ReaderAvailable (reader, (size_t)assetCount * 8)) return false;
+
+    Object *object = NULL;
+    return ApplyObjectState (reader, id, name, x, y, layer, timestamp,
+                             hidden != 0, assetIndex, assetCount, &object);
+}
+
+static bool ApplyObjectDeleteDelta (Reader *reader, int *flags) {
+    u64 id;
+    if (!ReaderU64 (reader, &id)) return false;
+
+    Object *object = EntityFind (id);
+    if (id == clientLockedId) clientLockedId = 0;
+    if (object != NULL && ObjectDelete (object)) *flags |= NET_UPDATE_DELETED;
+    return true;
+}
+
+static bool ApplyUserStateDelta (Reader *reader) {
+    u64 id;
+    char username[128];
+    uint32_t color;
+    uint8_t canscript;
+    uint8_t hasCursor;
+    float x, y;
+    if (!ReaderU64 (reader, &id) ||
+        !ReaderString (reader, username, sizeof (username)) ||
+        !ReaderU32 (reader, &color) ||
+        !ReaderBytes (reader, &canscript, 1) ||
+        !ReaderBytes (reader, &hasCursor, 1) ||
+        !ReaderF32 (reader, &x) || !ReaderF32 (reader, &y)) return false;
+    UserAdd (id, username);
+    UserSetColor (id, color);
+    UserSetCanScript (id, canscript != 0);
+    UserSetCursor (id, hasCursor != 0, x, y);
+    return true;
+}
+
+static bool ApplyUserLeaveDelta (Reader *reader) {
+    u64 id;
+    if (!ReaderU64 (reader, &id)) return false;
+    UserRemove (id);
+    if (id == clientUserId) clientLockedId = 0;
+
+    IdGroup ids = ObjectIds ();
+    for (int i = 0; i < ids.count; i++) {
+        Object *object = EntityFind (ids.ids[i]);
+        if (object != NULL && object->lockOwnerId == id)
+            object->lockOwnerId = 0;
+    }
+    IdGroupUnload (&ids);
+    return true;
+}
+
+static bool ApplyCursorDelta (Reader *reader) {
+    u64 id;
+    float x, y;
+    if (!ReaderU64 (reader, &id) || !ReaderF32 (reader, &x) || !ReaderF32 (reader, &y))
+        return false;
+    UserSetCursor (id, true, x, y);
+    return true;
+}
+
+static bool ApplyLockDelta (Reader *reader, int *flags) {
+    (void)flags;
+    u64 id;
+    u64 ownerId;
+    if (!ReaderU64 (reader, &id) || !ReaderU64 (reader, &ownerId))
+        return false;
+
+    Object *object = EntityFind (id);
+    if (object != NULL) object->lockOwnerId = ownerId;
+    if (ownerId == clientUserId) {
+        clientLockedId = id;
+        if (lockDone != NULL && id == pendingLockId) lockResult = 1;
+    } else if (id == clientLockedId) {
+        clientLockedId = 0;
+    }
+    return true;
+}
+
+static bool ApplyLockFailedDelta (Reader *reader, int *flags) {
+    u64 id;
+    if (!ReaderU64 (reader, &id) || reader->pos != reader->len) return false;
+    if (lockDone != NULL && id == pendingLockId) {
+        lockResult = -1;
+    } else {
+        lockLostId = id;
+        if (id == clientLockedId) clientLockedId = 0;
+        *flags |= NET_UPDATE_LOCK_LOST;
+    }
+    return true;
+}
+
+static bool ApplyMenuDelta (Reader *reader) {
+    u64 id;
+    uint32_t count;
+    if (!ReaderU64 (reader, &id) || !ReaderU32 (reader, &count) ||
+        count > 100000) return false;
+
+    char **names = NULL;
+    if (count > 0) {
+        names = calloc (count, sizeof (char *));
+        if (names == NULL) return false;
+        for (uint32_t i = 0; i < count; i++) {
+            char name[256];
+            if (!ReaderString (reader, name, sizeof (name)) ||
+                (names[i] = strdup (name)) == NULL) {
+                for (uint32_t j = 0; j < i; j++) free (names[j]);
+                free (names);
+                return false;
+            }
+        }
+    }
+
+    bool ok = MenuSetNames (id, (const char *const *)names, (int)count);
+
+    for (uint32_t i = 0; i < count; i++) free (names[i]);
+    free (names);
+    return ok;
+}
+
+static bool ApplyMessageDelta (Reader *reader, UiMessageKind kind) {
+    char message[NET_MAX_MESSAGE + 1];
+    if (!ReaderString (reader, message, sizeof (message)) || message[0] == '\0' ||
+        reader->pos != reader->len) return false;
+    UiShowMessageTextKind (message, kind);
+    return true;
+}
+
+static bool ApplyDelta (uint8_t type, const unsigned char *data, size_t length, int *flags) {
+    Reader reader = {data, length, 0};
+    bool ok = false;
+
+    switch (type) {
+        case NET_ASSET_ADD:
+            ok = ApplyAssetAddDelta (&reader);
             break;
-        }
-        if (update & NET_UPDATE_SCENE) {
-            // 全量快照会重建所有物件，旧指针立即失效
-            ResetClientSceneState (&chosen, &dragged, &dragMoved,
-                                   &suppressCanvasInput, &lastCanvasClickId,
-                                   &lastCanvasClickTime, ui);
-            sceneVersion = NetClientSceneVersion ();
-        } else {
-            if (update & NET_UPDATE_ASSET_DELETE_FAILED)
-                UiShowError (ui, "素材删除失败");
-            if (update & NET_UPDATE_ASSET_DELETED)
-                UiAssetDeleted (ui);
-            if (update & NET_UPDATE_DELETED) {
-                if (chosen != NULL && !ObjectContains (chosen)) {
-                    chosen = NULL;
-                    dragged = false;
-                    suppressCanvasInput = IsMouseButtonDown (MOUSE_BUTTON_LEFT);
-                }
-                UiObjectDeleted (ui);
-            }
-            if (update & NET_UPDATE_LOCK_LOST) {
-                if (chosen != NULL && chosen->id == NetClientLockLostId ()) {
-                    chosen = NULL;
-                    dragged = false;
-                    suppressCanvasInput = IsMouseButtonDown (MOUSE_BUTTON_LEFT);
-                }
-            }
-        }
-        if (chosen != NULL && chosen->lockOwnerId != 0 &&
-            chosen->lockOwnerId != NetClientUserId ()) {
-            chosen = NULL;
-            dragged = false;
-            suppressCanvasInput = IsMouseButtonDown (MOUSE_BUTTON_LEFT);
-        }
-        if (!NetClientConnected ()) break;
-
-        if (lockEventReady) {
-            lockEventReady = false;
-            if (dropInProgress) {
-                dropInProgress = false;
-                StartNextDrop ();
-            } else if (lockEventAcquired) {
-                u64 lockedId = NetClientLockedObjectId ();
-                Object *locked = EntityFind (lockedId);
-                if (locked != NULL) {
-                    chosen = locked;
-                    suppressCanvasInput = IsMouseButtonDown (MOUSE_BUTTON_LEFT);
-                    if (ui->objectManagerOpen) UiSelectObject (ui, locked);
-                    else BringObjectToFront (locked);
-                }
-            }
-        }
-        if (wasPending) {
-            if (IsFileDropped ()) {
-                FilePathList files = LoadDroppedFiles ();
-                UnloadDroppedFiles (files);
-            }
-            DrawBusyFrame (ui, view, chosen);
-            continue;
-        }
-        if (closeRequested) break;
-
-        bool wasModal = UiIsModal (ui);
-        UiEvent event = UiUpdate (ui);
-        bool isModal = UiIsModal (ui);
-
-        if (event.deselectObject) {
-            if (chosen != NULL) NetUnlockObject (chosen->id);
-            chosen = NULL;
-            dragged = false;
-            suppressCanvasInput = IsMouseButtonDown (MOUSE_BUTTON_LEFT);
-        }
-
-        switch (event.action) {
-            case UI_ACTION_LOCK_OBJECT: {
-                if (event.object == NULL) break;
-                chosen = NULL;
-                dragged = false;
-                if (!ObjectLockedBySelf (event.object)) {
-                    if (!NetRequestLock (event.object->id, OnLockDone))
-                        UiShowError (ui, "锁定物件失败");
-                } else if (!ui->objectManagerOpen) {
-                    BringObjectToFront (event.object);
-                }
-                break;
-            }
-            case UI_ACTION_RUN_MENU:
-                if (event.object == NULL) break;
-                {
-                    const char *name = MenuName (event.object->id, event.menuIndex);
-                    if (name == NULL ||
-                        !NetRequestMenu (event.object->id, event.menuIndex, name))
-                        UiShowError (ui, "执行菜单失败");
-                }
-                break;
-            case UI_ACTION_RUN_GLOBAL_MENU:
-                {
-                    const char *name = MenuName (0, event.menuIndex);
-                    if (name == NULL || !NetRequestMenu (0, event.menuIndex, name))
-                        UiShowError (ui, "执行菜单失败");
-                }
-                break;
-            case UI_ACTION_RUN_USER_MENU:
-                {
-                    u64 userId = NetClientUserId ();
-                    const char *name = MenuName (userId, event.menuIndex);
-                    if (userId == 0 || name == NULL ||
-                        !NetRequestMenu (userId, event.menuIndex, name))
-                        UiShowError (ui, "执行菜单失败");
-                }
-                break;
-            case UI_ACTION_UNLOCK_OBJECT:
-                if (event.object == NULL) break;
-                if (chosen == event.object) chosen = NULL;
-                dragged = false;
-                NetUnlockObject (event.object->id);
-                break;
-            case UI_ACTION_OPEN_SERVER: {
-                if (localPort == 0) {
-                    UiShowError (ui, "当前没有本地服务");
-                    break;
-                }
-                char message[160];
-                snprintf (message, sizeof (message), "已开放 %s:%d",
-                          localAddress, localPort);
-                UiShowMessage (ui, message);
-                UiSetConnectMenuVisible (ui, false);
-                break;
-            }
-            case UI_ACTION_CONNECT:
-                if (!openRemote (program, event.host, event.port, event.username)) {
-                    UiShowError (ui, "打开新窗口失败");
-                } else if (SceneIsEmpty ()) {
-                    // 当前窗口没有素材或物件，连接后不再保留旧窗口
-                    closeAfterConnect = true;
-                }
-                break;
-            case UI_ACTION_IMPORT_SAVE:
-                if (!NetRequestImport (event.path))
-                    UiShowError (ui, "导入请求失败");
-                break;
-            case UI_ACTION_EXPORT_SAVE:
-                if (!NetRequestExport (event.path))
-                    UiShowError (ui, "导出存档失败");
-                break;
-            case UI_ACTION_IMPORT:
-                if (!NetRequestAssetAdd (event.path)) {
-                    UiShowError (ui, "导入素材失败");
-                } else {
-                    UiOpenAssetManager (ui);
-                }
-                break;
-            case UI_ACTION_CREATE_OBJECT: {
-                Object *previous = ui->selectedObject;
-                if (previous != NULL) {
-                    NetUnlockObject (previous->id);
-                    if (chosen == previous) chosen = NULL;
-                    ui->selectedObject = NULL;
-                }
-                Vector2 center = view->cam.target;
-                if (!NetRequestObjectCreate (center, OnLockDone))
-                    UiShowError (ui, "新建物件失败");
-                break;
-            }
-            case UI_ACTION_RENAME_OBJECT: {
-                if (!ObjectLockedBySelf (event.object)) break;
-                if (ObjectRename (event.object, event.objectName))
-                    NetPublishObjectUpsert (event.object);
-                else
-                    UiShowError (ui, "重命名失败，名称已存在");
-                break;
-            }
-            case UI_ACTION_DELETE_OBJECT: {
-                if (!ObjectLockedBySelf (event.object)) break;
-                u64 id = event.object->id;
-                if (chosen == event.object) chosen = NULL;
-                dragged = false;
-                if (ObjectDelete (event.object)) {
-                    UiObjectDeleted (ui);
-                    NetRequestObjectDelete (id);
-                } else {
-                    UiShowError (ui, "删除物件失败");
-                }
-                break;
-            }
-            case UI_ACTION_ADD_OBJECT_ASSET:
-                if (ObjectLockedBySelf (event.object)) {
-                    IdGroup *assets = ObjectAssets (event.object);
-                    if (assets != NULL && IdGroupAdd (assets, event.asset->id)) {
-                        ObjectTouch (event.object);
-                        NetPublishObjectUpsert (event.object);
-                    } else {
-                        UiShowError (ui, "添加素材失败");
-                    }
-                } else if (!SendObjectAssetAdd (event.object, event.asset->id)) {
-                    UiShowError (ui, "添加素材失败");
-                }
-                break;
-            case UI_ACTION_USE_OBJECT_ASSET:
-                if (event.object == NULL || event.assetIndex < 0 ||
-                    event.assetIndex >= event.object->assets.count) break;
-                if (!ObjectLockedBySelf (event.object)) {
-                    UiShowError (ui, "物件未锁定，无法切换素材");
-                    break;
-                }
-                event.object->assetIndex = event.assetIndex;
-                if (!NetPublishObjectUpsert (event.object))
-                    UiShowError (ui, "切换素材失败");
-                break;
-            case UI_ACTION_REMOVE_OBJECT_ASSET:
-                if (ObjectLockedBySelf (event.object)) {
-                    IdGroup *assets = ObjectAssets (event.object);
-                    int assetIndex = AssetIndexAfterRemove (
-                        event.object->assetIndex, event.assetIndex,
-                        event.object->assets.count);
-                    if (assets != NULL && IdGroupRemoveAt (assets, event.assetIndex)) {
-                        event.object->assetIndex = assetIndex;
-                        ObjectTouch (event.object);
-                        NetPublishObjectUpsert (event.object);
-                    } else {
-                        UiShowError (ui, "移除素材失败");
-                    }
-                } else if (!SendObjectAssetRemove (event.object, event.assetIndex)) {
-                    UiShowError (ui, "移除素材失败");
-                }
-                break;
-            case UI_ACTION_MOVE_OBJECT_ASSET:
-                if (ObjectLockedBySelf (event.object)) {
-                    IdGroup *assets = ObjectAssets (event.object);
-                    if (assets != NULL && IdGroupMove (assets, event.assetIndex,
-                                                       event.assetTargetIndex)) {
-                        ObjectTouch (event.object);
-                        NetPublishObjectUpsert (event.object);
-                    } else {
-                        UiShowError (ui, "排序素材失败");
-                    }
-                } else if (!SendObjectAssetMove (event.object, event.assetIndex,
-                                                 event.assetTargetIndex)) {
-                    UiShowError (ui, "排序素材失败");
-                }
-                break;
-            case UI_ACTION_SET_OBJECT_LAYER:
-                if (!ObjectLockedBySelf (event.object)) break;
-                if (ObjectSetLayer (event.object, event.layer))
-                    NetPublishObjectUpsert (event.object);
-                else
-                    UiShowError (ui, "修改层数失败");
-                break;
-            case UI_ACTION_RENAME_ASSET:
-                if (!NetRequestAssetRename (event.asset->id, event.assetName))
-                    UiShowError (ui, "重命名失败");
-                break;
-            case UI_ACTION_REPLACE_ASSET: {
-                int fileSize = 0;
-                unsigned char *fileData = ReadFileBytes (event.path, &fileSize);
-                bool sent = fileData != NULL && fileSize > 0 &&
-                            NetRequestAssetReplace (event.asset->id,
-                                                    GetFileExtension (event.path),
-                                                    fileData, fileSize);
-                free (fileData);
-                if (!sent) UiShowError (ui, "更换素材失败");
-                break;
-            }
-            case UI_ACTION_DELETE_ASSET:
-                if (!NetRequestAssetDelete (event.asset->id))
-                    UiShowError (ui, "删除素材失败");
-                break;
-            case UI_ACTION_SET_BACKGROUND:
-                ViewSetBackground (view, event.background);
-                break;
-            case UI_ACTION_VIEW_ORIGIN:
-                ViewSetOrigin (view);
-                break;
-            case UI_ACTION_SET_ZOOM:
-                ViewSetZoom (view, event.zoom);
-                break;
-            case UI_ACTION_RUN_SCRIPT: {
-                User *self = UserFind (NetClientUserId ());
-                if (self != NULL && !self->canscript) {
-                    UiShowError (ui, "当前用户不允许提交脚本");
-                    break;
-                }
-                if (NetRequestScript (ui->scriptText.data != NULL ? ui->scriptText.data : "",
-                                      ui->scriptSelf)) {
-                    ui->scriptOpen = false;
-                    ui->scriptScroll = 0.0f;
-                    TextBufferFree (&ui->scriptText);
-                    UiShowMessage (ui, "脚本已提交");
-                } else {
-                    UiShowError (ui, "脚本提交失败");
-                }
-                break;
-            }
-            case UI_ACTION_NONE:
-            default:
-                break;
-        }
-
-        if (NetClientSceneVersion () != sceneVersion) {
-            ResetClientSceneState (&chosen, &dragged, &dragMoved,
-                                   &suppressCanvasInput, &lastCanvasClickId,
-                                   &lastCanvasClickTime, ui);
-            sceneVersion = NetClientSceneVersion ();
-        }
-
-        if (closeAfterConnect) break;
-
-        Vector2 mouse = GetMousePosition ();
-
-        if (!event.mouseCaptured) {
-            float wheel = GetMouseWheelMove ();
-            if (wheel != 0.0f) ViewZoomAt (view, mouse, wheel);
-        }
-
-        Vector2 world = ViewScreenToWorld (view, mouse);
-
-        // 拖入图片：素材、物件和锁定由服务端一次完成
-        if (IsFileDropped ()) {
-            FilePathList files = LoadDroppedFiles ();
-
-            if (!wasModal && !isModal) {
-                int failed = 0;
-                for (unsigned int i = 0; i < files.count; i++) {
-                    const char *path = files.paths[i];
-                    if (PathHasExtension (path, ".dsk") ||
-                        PathIsDirectory (path)) {
-                        if (!NetRequestImport (path)) failed++;
-                        continue;
-                    }
-                    if (!PathIsImage (path)) {
-                        failed++;
-                        continue;
-                    }
-
-                    Vector2 position = {world.x + i * 20.0f, world.y + i * 20.0f};
-                    if (!DropQueuePush (path, position)) failed++;
-                }
-                if (!dropInProgress && !NetClientLockPending ())
-                    StartNextDrop ();
-                if (failed > 0) UiShowError (ui, "有文件导入失败");
-            } else {
-                UiShowError (ui, "弹窗打开时不能拖入文件");
-            }
-
-            UnloadDroppedFiles (files);
-        }
-
-        if (NetClientSceneVersion () != sceneVersion) {
-            ResetClientSceneState (&chosen, &dragged, &dragMoved,
-                                   &suppressCanvasInput, &lastCanvasClickId,
-                                   &lastCanvasClickTime, ui);
-            sceneVersion = NetClientSceneVersion ();
-        }
-
-        bool wasDraggingObject = dragged && chosen != NULL;
-        bool leftDown = IsMouseButtonDown (MOUSE_BUTTON_LEFT);
-
-        if (!event.mouseCaptured && !suppressCanvasInput) {
-            if (IsMouseButtonPressed (MOUSE_BUTTON_LEFT)) {
-                Object *picked = ObjectPick (world);
-                if (picked == NULL) {
-                    if (chosen != NULL) NetUnlockObject (chosen->id);
-                    chosen = NULL;
-                    dragged = true;
-                    dragMoved = false;
-                } else if (picked->lockOwnerId != 0 &&
-                           picked->lockOwnerId != NetClientUserId ()) {
-                    suppressCanvasInput = true;
-                } else if (ObjectLockedBySelf (picked)) {
-                    double now = GetTime ();
-                    if (picked->id == lastCanvasClickId &&
-                        now - lastCanvasClickTime <= 0.35) {
-                        chosen = picked;
-                        UiOpenObjectAssets (ui, picked);
-                        suppressCanvasInput = true;
-                        lastCanvasClickId = 0;
-                        lastCanvasClickTime = 0.0;
-                    } else {
-                        chosen = picked;
-                        grab = Vector2Subtract (world, picked->pos);
-                        dragged = true;
-                        dragMoved = false;
-                        lastCanvasClickId = picked->id;
-                        lastCanvasClickTime = now;
-                        BringObjectToFront (picked);
-                    }
-                } else if (!NetRequestLock (picked->id, OnLockDone)) {
-                    suppressCanvasInput = true;
-                } else {
-                    chosen = NULL;
-                    dragged = false;
-                    suppressCanvasInput = true;
-                }
-            }
-
-            if (!suppressCanvasInput) {
-                bool canDrag = chosen == NULL || ObjectLockedBySelf (chosen);
-                if (dragged && leftDown && canDrag) {
-                    if (chosen != NULL) {
-                        Vector2 oldPosition = chosen->pos;
-                        ObjectMove (chosen, Vector2Subtract (world, grab));
-                        if (chosen->pos.x != oldPosition.x || chosen->pos.y != oldPosition.y)
-                            dragMoved = true;
-                    } else {
-                        ViewPan (view, GetMouseDelta ());
-                    }
-                } else {
-                    dragged = false;
-                }
-
-                if (IsMouseButtonPressed (MOUSE_BUTTON_RIGHT)) {
-                    Object *object = ObjectPick (world);
-                    if (object == NULL) {
-                        UiOpenGlobalContext (ui, mouse);
-                    } else if (object->lockOwnerId != 0 &&
-                               object->lockOwnerId != NetClientUserId ()) {
-                        /* 被其他客户端占用：无操作 */
-                    } else if (ObjectLockedBySelf (object)) {
-                        chosen = object;
-                        BringObjectToFront (object);
-                        UiOpenObjectContext (ui, object, mouse);
-                    } else if (!NetRequestLock (object->id, OnLockDone)) {
-                        suppressCanvasInput = true;
-                    } else {
-                        chosen = NULL;
-                        suppressCanvasInput = true;
-                    }
-                }
-            } else {
-                dragged = false;
-            }
-        } else {
-            dragged = false;
-        }
-
-        if (NetClientSceneVersion () != sceneVersion) {
-            ResetClientSceneState (&chosen, &dragged, &dragMoved,
-                                   &suppressCanvasInput, &lastCanvasClickId,
-                                   &lastCanvasClickTime, ui);
-            sceneVersion = NetClientSceneVersion ();
-        }
-
-        if (suppressCanvasInput && !IsMouseButtonDown (MOUSE_BUTTON_LEFT))
-            suppressCanvasInput = false;
-
-        // 拖动期间定时广播物件位置，让其他客户端看到连续移动
-        if (dragged && chosen != NULL && chosen->lockOwnerId != 0 &&
-            chosen->lockOwnerId == NetClientUserId ()) {
-            double now = GetTime ();
-            if (now - lastObjectSync >= 0.03) {
-                lastObjectSync = now;
-                NetPublishObjectUpsert (chosen);
-                NetRequestDragUpdate (chosen->id);
-            }
-        }
-
-        if (wasDraggingObject && !dragged && chosen != NULL) {
-            NetPublishObjectUpsert (chosen);
-            if (dragMoved) {
-                NetRequestDragUpdate (chosen->id);
-                NetRequestDragEnd (chosen->id);
-            }
-            dragMoved = false;
-        }
-
-        {
-            double now = GetTime ();
-            if (now - lastCursorSend >= 0.05) {
-                lastCursorSend = now;
-                NetPublishCursor (ViewScreenToWorld (view, mouse));
-            }
-        }
-
-        if (!NetClientConnected ()) break;
-
-        BeginDrawing ();
-        ClearBackground (WHITE);
-        ViewDraw (view, chosen, ui->font);
-        DrawNetCursors (ui, view);
-        UiDraw (ui);
-        EndDrawing ();
+        case NET_ASSET_RENAME:
+            ok = ApplyAssetRenameDelta (&reader);
+            break;
+        case NET_ASSET_REPLACE:
+            ok = ApplyAssetReplaceDelta (&reader);
+            break;
+        case NET_ASSET_DELETE:
+            ok = ApplyAssetDeleteDelta (&reader, flags);
+            break;
+        case NET_ASSET_DELETE_FAILED:
+            ok = ApplyAssetDeleteFailedDelta (&reader, flags);
+            break;
+        case NET_OBJECT_CREATED:
+            ok = ApplyObjectCreatedDelta (&reader, flags);
+            break;
+        case NET_OBJECT_UPSERT:
+            ok = ApplyObjectUpsertDelta (&reader);
+            break;
+        case NET_OBJECT_DELETE:
+            ok = ApplyObjectDeleteDelta (&reader, flags);
+            break;
+        case NET_USER_STATE:
+            ok = ApplyUserStateDelta (&reader);
+            break;
+        case NET_USER_LEAVE:
+            ok = ApplyUserLeaveDelta (&reader);
+            break;
+        case NET_CURSOR_STATE:
+            ok = ApplyCursorDelta (&reader);
+            break;
+        case NET_LOCK_STATE:
+            ok = ApplyLockDelta (&reader, flags);
+            break;
+        case NET_LOCK_FAILED:
+            ok = ApplyLockFailedDelta (&reader, flags);
+            break;
+        case NET_MESSAGE:
+            ok = ApplyMessageDelta (&reader, UI_MESSAGE_SCRIPT);
+            break;
+        case NET_ERROR:
+            ok = ApplyMessageDelta (&reader, UI_MESSAGE_ERROR);
+            break;
+        case NET_INFO:
+            ok = ApplyMessageDelta (&reader, UI_MESSAGE_INFO);
+            break;
+        case NET_MENU:
+            ok = ApplyMenuDelta (&reader);
+            break;
+        default:
+            return false;
     }
 
-    DropQueueClear ();
-    return 0;
+    return ok && reader.pos == reader.len;
+}
+
+static bool ParseClientFrames (int *flags) {
+    size_t offset = 0;
+
+    while (clientIn.len - offset >= 5) {
+        const unsigned char *data = clientIn.data + offset;
+        uint32_t payloadSize = (uint32_t)data[0] | ((uint32_t)data[1] << 8) |
+                               ((uint32_t)data[2] << 16) | ((uint32_t)data[3] << 24);
+        if (payloadSize == 0 || payloadSize > NET_MAX_FRAME) return false;
+
+        size_t frameSize = 4 + (size_t)payloadSize;
+        if (clientIn.len - offset < frameSize) break;
+
+        uint8_t type = data[4];
+        const unsigned char *payload = data + 5;
+        size_t payloadLength = (size_t)payloadSize - 1;
+
+        if (type == NET_REJECT) {
+            *flags |= NET_UPDATE_REJECTED;
+            return true;
+        }
+        if (type == NET_SNAPSHOT) {
+            if (!ApplySnapshot (payload, payloadLength)) return false;
+            *flags |= NET_UPDATE_SCENE;
+        } else if (!ApplyDelta (type, payload, payloadLength, flags)) {
+            return false;
+        }
+
+        offset += frameSize;
+    }
+
+    if (offset > 0) {
+        memmove (clientIn.data, clientIn.data + offset, clientIn.len - offset);
+        clientIn.len -= offset;
+    }
+    return true;
+}
+
+int NetClientUpdate (void) {
+    ClientPump (0);
+
+    if (lockDone != NULL) {
+        bool timeout = lockTimeout > 0.0 &&
+                       GetTime () - lockStarted >= lockTimeout;
+        if (lockResult != 0 || timeout) {
+            NetLockDoneFn done = lockDone;
+            bool acquired = lockResult > 0;
+            lockDone = NULL;
+            lockResult = 0;
+            pendingLockId = 0;
+            done (acquired);
+        }
+    }
+
+    int flags = clientPendingFlags;
+    clientPendingFlags = NET_UPDATE_NONE;
+    if (flags & NET_UPDATE_REJECTED) ClientCloseNow ();
+    return flags;
 }

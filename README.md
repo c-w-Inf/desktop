@@ -168,7 +168,8 @@ raylib 6.2，不需要把 Linux 版 raylib 二进制放进仓库。
 
 | 文件 | 职责 |
 | --- | --- |
-| `src/client.c` / `src/client.h` | 已连接后的客户端主循环：UI、拖放、锁定 pending、加载动画和渲染 |
+| `src/client.c` | 客户端联机：连接、请求、增量应用 |
+| `src/client_ui.c` / `src/client.h` | 已连接后的客户端主循环：UI、拖放、锁定 pending、加载动画和渲染 |
 | `src/main.c` | 原生入口：参数、窗口、本地服务端、连接和客户端启动 |
 | `src/utils.c` / `src/utils.h` | 公共 `u64`、`IdGroup`、`TextBuffer`、`StrDup` 和随机数工具 |
 | `src/script.c` / `src/script.h` | 脚本解释器：现场解析、按 self 隔离的环境、函数支持参数并内置 `messagef`/`object`/`user`/`flip`/`size`/`assets`/`typeof`/`menu`/`rand`/`int`/`move`/`pos`/`locked`/`color`/`script`/`fork`/`untouch`/`hide`/`show`；运行时值使用 json-c，原生支持 `u64` |
@@ -178,7 +179,10 @@ raylib 6.2，不需要把 Linux 版 raylib 二进制放进仓库。
 | `src/user.c` / `src/user.h` | 在线用户：用户 ID、名称、光标状态和颜色，支持查找、增删和遍历 |
 | `src/strmap.c` / `src/strmap.h` | 哈希字符串 → `void *` 索引，惰性构建按名称排序的遍历视图 |
 | `src/netutils.h` / `src/netutils.c` | 跨平台传输抽象：native libuv TCP，Web 端保留 TCP 监听 stub |
-| `src/net.c` / `src/net.h` | libuv TCP 联机：无头服务器、权威场景、增量操作、物件占用、在线光标和全量快照 |
+| `src/control.c` / `src/control.h` | 本地 GUI 与服务端之间的 libuv 控制管道 |
+| `src/server.c` | 服务端：监听、权威场景、锁定、脚本、快照和增量广播 |
+| `src/net_common.h` | 客户端/服务端共享的协议常量、Buffer/Reader 和帧编码 |
+| `src/net.h` | 客户端与服务端公共接口 |
 | `src/assets.c` / `src/assets.h` | 素材库：name → id 有序索引；`Asset` 逐个 malloc 并由 entity 按 id 注册 |
 | `src/object.c` / `src/object.h` | 物件：name → id 有序索引；`Object` 逐个 malloc 并由 entity 按 id 注册，持有素材数组、层数、时间戳、位置、命中检测 |
 | `src/save.c` / `src/save.h` | 服务端存档与导入：libzip 读写 `.dsk`，libuv 处理路径、目录和原子替换；不保存用户私有数据 |
