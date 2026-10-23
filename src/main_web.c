@@ -18,7 +18,7 @@
 #include "user.h"
 #include "view.h"
 
-#define WEB_DEFAULT_PORT 7777
+#define WEB_DEFAULT_SERVER "wss://dsk.cwinf.top"
 
 static ClientFrameState webFrame;
 static const char *webError;
@@ -123,15 +123,11 @@ int main (void) {
     char serverText[512];
     char name[128];
     char query[1024];
-    char pageHost[256];
     WebLocationPart ("location.search", query, sizeof (query));
-    WebLocationPart ("location.hostname", pageHost, sizeof (pageHost));
     if (WebQueryValue (query, "server", serverText, sizeof (serverText)))
         WebUrlDecode (serverText);
     else {
-        snprintf (serverText, sizeof (serverText), "ws://%s:%d",
-                  pageHost[0] != '\0' ? pageHost : "127.0.0.1",
-                  WEB_DEFAULT_PORT);
+        snprintf (serverText, sizeof (serverText), "%s", WEB_DEFAULT_SERVER);
     }
     if (WebQueryValue (query, "name", name, sizeof (name)))
         WebUrlDecode (name);
