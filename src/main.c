@@ -579,7 +579,6 @@ int main (int argc, char **argv) {
                 chosen = NULL;
                 dragged = false;
                 if (!ObjectLockedBySelf (event.object)) {
-                    ReleaseOwnedObjectLock (true);
                     bool acquired = false;
                     event.object = AcquireObjectLock (event.object, &acquired);
                     if (event.object == NULL) {
@@ -910,13 +909,10 @@ int main (int argc, char **argv) {
                                        picked->id == lastCanvasClickId &&
                                        now - lastCanvasClickTime <= 0.35;
                     if (doubleClick) {
-                        if (chosen != NULL && chosen != picked)
-                            NetUnlockObject (chosen->id);
                         chosen = picked;
 
                         bool opened = true;
                         if (!ObjectLockedBySelf (chosen)) {
-                            ReleaseOwnedObjectLock (true);
                             bool acquired = false;
                             chosen = AcquireObjectLock (chosen, &acquired);
                             if (chosen == NULL) opened = false;
@@ -931,7 +927,8 @@ int main (int argc, char **argv) {
                         lastCanvasClickTime = 0.0;
                     } else {
                         if (picked != chosen) {
-                            if (chosen != NULL) NetUnlockObject (chosen->id);
+                            if (picked == NULL && chosen != NULL)
+                                NetUnlockObject (chosen->id);
                             chosen = picked;
                         }
 
@@ -981,10 +978,8 @@ int main (int argc, char **argv) {
                     if (lockedByOther) {
                         // 被其他客户端占用：保持无操作，不提示
                     } else if (object != NULL) {
-                        if (object != chosen) {
-                            if (chosen != NULL) NetUnlockObject (chosen->id);
+                        if (object != chosen)
                             chosen = object;
-                        }
 
                         if (chosen != NULL) {
                             bool acquired = false;

@@ -2565,6 +2565,8 @@ bool NetLockObject (u64 id) {
         return true;
     }
     if (object->lockOwnerId != 0) return false;
+    if (clientLockedId != 0 && clientLockedId != id)
+        NetUnlockObject (clientLockedId);
 
     Buffer frame = {0};
     if (!FrameObjectLock (&frame, NET_LOCK, id)) {
