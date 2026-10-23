@@ -11,7 +11,7 @@ pkg_check_modules(LIBUV REQUIRED IMPORTED_TARGET libuv)
 find_package(ZLIB REQUIRED)
 
 find_package(raylib CONFIG QUIET)
-if(NOT TARGET raylib AND NOT WIN32)
+if(NOT TARGET raylib AND CMAKE_SYSTEM_NAME STREQUAL "Linux")
     find_package(raylib CONFIG QUIET
         PATHS "${CMAKE_CURRENT_SOURCE_DIR}/third_party/raylib/lib/cmake/raylib"
         NO_DEFAULT_PATH)
@@ -21,7 +21,7 @@ if(NOT TARGET raylib)
 endif()
 
 find_package(libzip CONFIG QUIET)
-if(NOT TARGET libzip::zip AND NOT WIN32)
+if(NOT TARGET libzip::zip AND CMAKE_SYSTEM_NAME STREQUAL "Linux")
     find_package(libzip CONFIG QUIET
         PATHS "${CMAKE_CURRENT_SOURCE_DIR}/.local/libzip/lib/cmake/libzip"
         NO_DEFAULT_PATH)
@@ -75,8 +75,10 @@ if(WIN32)
         ws2_32 iphlpapi userenv psapi comdlg32 ole32 shell32 uuid)
 else()
     target_link_libraries(image_canvas PRIVATE m ${CMAKE_DL_LIBS})
-    set_target_properties(image_canvas PROPERTIES
-        BUILD_RPATH "${CMAKE_CURRENT_SOURCE_DIR}/third_party/raylib/lib")
+    if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+        set_target_properties(image_canvas PROPERTIES
+            BUILD_RPATH "${CMAKE_CURRENT_SOURCE_DIR}/third_party/raylib/lib")
+    endif()
 endif()
 
 if(MSVC)

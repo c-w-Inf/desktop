@@ -123,3 +123,46 @@ jobs:
         with:
           name: image-canvas-windows-x64
           path: dist/
+
+  macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install dependencies
+        run: brew install cmake ninja pkg-config raylib json-c libuv libzip
+      - name: Configure
+        run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+      - name: Build
+        run: cmake --build build
+      - name: Server and save smoke test
+        run: |
+          ./image_canvas --server --port 7891 --save ci.dsk > server.log 2>&1 &
+          pid=$!
+          for i in $(seq 1 30); do
+            grep -q "listening" server.log && break
+            sleep 0.2
+          done
+          cat server.log
+          python3 - <<'PY'
+          import socket, struct
+          s = socket.create_connection(("127.0.0.1", 7891), 3)
+          name = b"ci"
+          payload = struct.pack("<H", len(name)) + name
+          s.sendall(struct.pack("<I", len(payload) + 1) + bytes([8]) + payload)
+          s.settimeout(3)
+          data = s.recv(4)
+          assert len(data) == 4
+          size = struct.unpack("<I", data)[0]
+          frame = b""
+          while len(frame) < size:
+              frame += s.recv(size - len(frame))
+          assert frame[0] == 1, frame[0]
+          s.close()
+          print("snapshot ok")
+          PY
+          kill -TERM "$pid" 2>/dev/null || true
+          wait "$pid" 2>/dev/null || true
+          test -s ci.dsk
+          printf 'stop\n' | ./image_canvas --server --port 7892 --control-stdin --load ci.dsk > load.log 2>&1
+          cat load.log
+          grep -q "listening" load.log
