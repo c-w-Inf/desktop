@@ -26,6 +26,7 @@ jobs:
             -DBUILD_SHARED_LIBS=ON
           cmake --build raylib-build
           sudo cmake --install raylib-build
+          sudo ldconfig
       - name: Configure
         run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
       - name: Build
@@ -38,6 +39,7 @@ jobs:
             grep -q "listening" server.log && break
             sleep 0.2
           done
+          cat server.log
           python3 - <<'PY'
           import socket, struct, time
           s = socket.create_connection(("127.0.0.1", 7888), 3)
