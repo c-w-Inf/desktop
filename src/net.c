@@ -1984,7 +1984,6 @@ static void ClientOnRead (uv_stream_t *stream, ssize_t nread,
     if (flags & NET_UPDATE_REJECTED) ClientCloseNow ();
 }
 
-static void ClientCloseNow (void);
 
 static void ClientOnWriteDone (uv_write_t *request, int status) {
     (void)request;
