@@ -17,6 +17,9 @@ bool PathIsImage (const char *path);
 bool PathIsDirectory (const char *path);
 /* 读取整个文件；返回 malloc 分配的字节，失败返回 NULL。 */
 unsigned char *ReadFileBytes (const char *path, int *size);
+/* 安装 Ctrl+C / 终止信号处理器，仅设置停止标志。 */
+void UtilsInstallStopHandlers (void);
+bool UtilsStopRequested (void);
 
 u64 RandomNext (void);
 u64 RandomBounded (u64 limit);

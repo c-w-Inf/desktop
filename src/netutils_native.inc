@@ -40,8 +40,6 @@ struct NetutilServer {
 
 static uv_loop_t netutilLoop;
 static uv_timer_t netutilPumpTimer;
-static uv_pipe_t netutilStdin;
-static bool netutilStdinOpen;
 static bool netutilInitialized;
 
 static bool BufferReserve (NetutilBuffer *buffer, size_t extra) {
@@ -77,21 +75,31 @@ static void NetutilStreamFree (NetutilStream *stream) {
 
 static void NetutilStreamClosed (uv_handle_t *handle);
 static void NetutilWriteDone (uv_write_t *request, int status);
+static void NetutilFlush (NetutilStream *stream);
 static void NetutilReadData (uv_stream_t *handle, ssize_t nread,
                              const uv_buf_t *buffer);
 static void NetutilAllocData (uv_handle_t *handle, size_t suggested,
                               uv_buf_t *buffer);
 
+static void NetutilMaybeClose (NetutilStream *stream) {
+    if (stream == NULL || !stream->closing || stream->resolving) return;
+    if (stream->writing || stream->out.len > 0) return;
+    if (stream->handleInitialized) {
+        if (uv_is_closing ((uv_handle_t *)&stream->handle)) return;
+        uv_read_stop ((uv_stream_t *)&stream->handle);
+        uv_close ((uv_handle_t *)&stream->handle, NetutilStreamClosed);
+    } else {
+        NetutilStreamFree (stream);
+    }
+}
+
 static void NetutilStreamClose (NetutilStream *stream) {
     if (stream == NULL || stream->closing) return;
     stream->closing = true;
-    if (stream->handleInitialized &&
-        !uv_is_closing ((uv_handle_t *)&stream->handle)) {
+    if (stream->handleInitialized)
         uv_read_stop ((uv_stream_t *)&stream->handle);
-        uv_close ((uv_handle_t *)&stream->handle, NetutilStreamClosed);
-    } else if (!stream->handleInitialized && !stream->resolving) {
-        NetutilStreamFree (stream);
-    }
+    NetutilFlush (stream);
+    NetutilMaybeClose (stream);
 }
 
 static void NetutilStreamClosed (uv_handle_t *handle) {
@@ -151,6 +159,7 @@ static void NetutilWriteDone (uv_write_t *request, int status) {
         return;
     }
     NetutilFlush (stream);
+    NetutilMaybeClose (stream);
 }
 
 static void NetutilStartRead (NetutilStream *stream) {
@@ -253,7 +262,6 @@ bool NetutilInit (void) {
 
 void NetutilShutdown (void) {
     if (!netutilInitialized) return;
-    NetutilStdinStop ();
     uv_close ((uv_handle_t *)&netutilPumpTimer, NULL);
     uv_run (&netutilLoop, UV_RUN_DEFAULT);
     uv_loop_close (&netutilLoop);
@@ -368,46 +376,3 @@ void NetutilPump (int timeout_ms) {
     uv_timer_stop (&netutilPumpTimer);
 }
 
-static NetutilStdinFn netutilStdinCallback;
-static void *netutilStdinUser;
-
-static void NetutilStdinAlloc (uv_handle_t *handle, size_t suggested,
-                               uv_buf_t *buffer) {
-    (void)handle;
-    if (suggested > 4096) suggested = 4096;
-    buffer->base = malloc (suggested);
-    buffer->len = buffer->base != NULL ? suggested : 0;
-}
-
-static void NetutilStdinRead (uv_stream_t *stream, ssize_t nread,
-                              const uv_buf_t *buffer) {
-    (void)stream;
-    if (nread > 0 && buffer->base != NULL && netutilStdinCallback != NULL)
-        netutilStdinCallback ((const unsigned char *)buffer->base,
-                              (size_t)nread, netutilStdinUser);
-    free (buffer->base);
-}
-
-bool NetutilStdinStart (NetutilStdinFn callback, void *user) {
-    if (!netutilInitialized || netutilStdinOpen) return false;
-    if (uv_pipe_init (&netutilLoop, &netutilStdin, 0) != 0) return false;
-    netutilStdinCallback = callback;
-    netutilStdinUser = user;
-    if (uv_pipe_open (&netutilStdin, 0) != 0 ||
-        uv_read_start ((uv_stream_t *)&netutilStdin, NetutilStdinAlloc,
-                       NetutilStdinRead) != 0) {
-        netutilStdinCallback = NULL;
-        netutilStdinUser = NULL;
-        return false;
-    }
-    netutilStdinOpen = true;
-    return true;
-}
-
-void NetutilStdinStop (void) {
-    if (!netutilStdinOpen) return;
-    netutilStdinOpen = false;
-    netutilStdinCallback = NULL;
-    netutilStdinUser = NULL;
-    uv_close ((uv_handle_t *)&netutilStdin, NULL);
-}

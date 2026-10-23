@@ -1,6 +1,7 @@
 #include "utils.h"
 
 #include <limits.h>
+#include <signal.h>
 #include <stdlib.h>
 #include <string.h>
 #include <strings.h>
@@ -8,6 +9,30 @@
 #include <time.h>
 
 #include <uv.h>
+
+static volatile sig_atomic_t stopRequested;
+
+static void OnStopSignal (int signal) {
+    (void)signal;
+    stopRequested = 1;
+}
+
+void UtilsInstallStopHandlers (void) {
+    signal (SIGINT, OnStopSignal);
+#ifdef SIGTERM
+    signal (SIGTERM, OnStopSignal);
+#endif
+#ifdef SIGHUP
+    signal (SIGHUP, OnStopSignal);
+#endif
+#ifdef SIGBREAK
+    signal (SIGBREAK, OnStopSignal);
+#endif
+}
+
+bool UtilsStopRequested (void) {
+    return stopRequested != 0;
+}
 
 char *StrDup (const char *text) {
     size_t length = strlen (text) + 1;
