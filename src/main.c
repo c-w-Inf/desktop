@@ -46,7 +46,6 @@ typedef struct {
     uv_write_t controlWrite;
     int port;
     bool started;
-    bool exited;
     bool controlOpen;
 } LocalServer;
 
@@ -102,7 +101,6 @@ static void LocalServerExited (uv_process_t *process, int64_t status,
     (void)signal;
     LocalServer *local = process->data;
     if (local != NULL) {
-        local->exited = true;
         local->started = false;
         if (local->controlOpen) {
             uv_close ((uv_handle_t *)&local->control, NULL);
@@ -168,7 +166,6 @@ static bool StartLocalServer (LocalServer *local, const char *program,
     local->process.data = local;
     local->port = port;
     local->started = true;
-    local->exited = false;
     return true;
 }
 
@@ -212,12 +209,15 @@ static bool ConnectLocalSession (LocalServer *local, const char *program,
     return false;
 }
 
+static void RemoteProcessClosed (uv_handle_t *handle) {
+    free (handle);
+}
+
 static void RemoteWindowExited (uv_process_t *process, int64_t status,
                                 int signal) {
     (void)status;
     (void)signal;
-    uv_close ((uv_handle_t *)process, NULL);
-    free (process);
+    uv_close ((uv_handle_t *)process, RemoteProcessClosed);
 }
 
 static bool OpenRemoteWindow (const char *program, const char *host, int port,
@@ -245,8 +245,12 @@ static bool OpenRemoteWindow (const char *program, const char *host, int port,
 
 static void CloseProcessHandle (uv_handle_t *handle, void *data) {
     (void)data;
-    if (handle->type == UV_PROCESS && !uv_is_closing (handle))
-        uv_close (handle, NULL);
+    if (handle->type == UV_PROCESS && !uv_is_closing (handle)) {
+        if (handle->data == NULL)
+            uv_close (handle, RemoteProcessClosed);
+        else
+            uv_close (handle, NULL);
+    }
 }
 
 static void CloseAppLoop (void) {

@@ -12,3 +12,4 @@ core
 /dsk/
 /build/
 /dist/
+/.tmp-*

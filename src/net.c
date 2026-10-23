@@ -681,7 +681,7 @@ static void ServerClientWriteDone (uv_write_t *request, int status) {
     ServerClient *client = request->data;
     client->writing = false;
     BufferFree (&client->writeData);
-    if (status < 0) {
+    if (status < 0 && !client->closing) {
         if (client->joined) ServerBeginDisconnect (client);
         else client->closing = true;
     }

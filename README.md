@@ -137,8 +137,12 @@ sudo pacman -S cmake ninja raylib json-c libuv libzip zlib
 Linux（Debian/Ubuntu）：
 
 ```bash
-sudo apt install cmake ninja-build pkg-config libraylib-dev \
-  libjson-c-dev libuv1-dev libzip-dev
+sudo apt install cmake ninja-build pkg-config git \
+  libjson-c-dev libuv1-dev libzip-dev \
+  libgl1-mesa-dev libglu1-mesa-dev libx11-dev libxrandr-dev \
+  libxi-dev libxcursor-dev libxinerama-dev libwayland-dev \
+  libxkbcommon-dev
+# Ubuntu 仓库没有 raylib 6.2，需要从源码构建；GitHub Actions 已包含该步骤
 ```
 
 Windows 使用 MSYS2 UCRT64，安装：

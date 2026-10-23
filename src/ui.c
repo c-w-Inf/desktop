@@ -275,6 +275,9 @@ static Ui *activeUi;
 
 void UiInit (Ui *ui) {
     activeUi = ui;
+#ifdef _WIN32
+    tinyfd_winUtf8 = 1;
+#endif
     ui->showConnectMenu = true;
     ui->showFileMenu = true;
     ui->menuOpen = -1;
