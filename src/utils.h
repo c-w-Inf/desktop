@@ -15,6 +15,8 @@ bool PathHasExtension (const char *path, const char *extension);
 bool PathIsImage (const char *path);
 /* 是否为目录（跟随符号链接）。 */
 bool PathIsDirectory (const char *path);
+/* 读取整个文件；返回 malloc 分配的字节，失败返回 NULL。 */
+unsigned char *ReadFileBytes (const char *path, int *size);
 
 u64 RandomNext (void);
 u64 RandomBounded (u64 limit);

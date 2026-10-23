@@ -645,7 +645,9 @@ static void ServerClientClosed (uv_handle_t *handle);
 static void ServerBeginDisconnect (ServerClient *client);
 
 static void ServerClientFlush (ServerClient *client) {
-    if (!client->active || client->writing || client->out.len == 0) return;
+    if (!client->active || client->writing || client->out.len == 0 ||
+        uv_is_closing ((uv_handle_t *)&client->handle))
+        return;
 
     client->writeData = client->out;
     memset (&client->out, 0, sizeof (client->out));
@@ -705,7 +707,8 @@ static void ServerClientClosed (uv_handle_t *handle) {
 }
 
 static void ServerClientEnqueue (ServerClient *client, const unsigned char *data, size_t size) {
-    if (!client->active) return;
+    if (!client->active || uv_is_closing ((uv_handle_t *)&client->handle))
+        return;
     if (client->out.len + size > NET_MAX_OUTPUT ||
         !BufferAppend (&client->out, data, size)) {
         client->closing = true;
@@ -2102,6 +2105,7 @@ bool NetClientConnect (const char *host, int port, const char *username) {
     if (username == NULL || username[0] == '\0') return false;
     ClientCloseNow ();
     ClientWaitClosed (1000);
+    if (clientHandleInitialized) return false;
     UserUnload ();
     clientPendingFlags = NET_UPDATE_NONE;
     nextRequestId = 1;
@@ -2392,16 +2396,16 @@ static bool WaitForResponse (const char *what, char *error, int errorSize) {
 
 Asset *NetCreateAsset (const char *path) {
     int size = 0;
-    unsigned char *data = LoadFileData (path, &size);
+    unsigned char *data = ReadFileBytes (path, &size);
     if (data == NULL || size <= 0) {
-        UnloadFileData (data);
+        free (data);
         return NULL;
     }
 
     const char *ext = GetFileExtension (path);
     Image image = LoadImageFromMemory (ext, data, size);
     if (image.data == NULL) {
-        UnloadFileData (data);
+        free (data);
         return NULL;
     }
     UnloadImage (image);
@@ -2421,7 +2425,7 @@ Asset *NetCreateAsset (const char *path) {
               BufferAppend (&payload, data, (size_t)size) &&
               FrameMake (&frame, NET_REQ_ASSET_ADD, &payload);
     BufferFree (&payload);
-    UnloadFileData (data);
+    free (data);
     if (!ok) {
         BufferFree (&frame);
         waitingRequestId = 0;

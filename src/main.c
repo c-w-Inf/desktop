@@ -157,13 +157,13 @@ static bool StartLocalServer (LocalServer *local, const char *program,
     options.flags |= UV_PROCESS_WINDOWS_HIDE;
 #endif
 
+    local->process.data = local;
     int result = uv_spawn (&appLoop, &local->process, &options);
     if (result != 0) {
         uv_close ((uv_handle_t *)&local->control, NULL);
         local->controlOpen = false;
         return false;
     }
-    local->process.data = local;
     local->port = port;
     local->started = true;
     return true;
@@ -799,12 +799,12 @@ int main (int argc, char **argv) {
                 break;
             case UI_ACTION_REPLACE_ASSET: {
                 int fileSize = 0;
-                unsigned char *fileData = LoadFileData (event.path, &fileSize);
+                unsigned char *fileData = ReadFileBytes (event.path, &fileSize);
                 bool sent = fileData != NULL && fileSize > 0 &&
                             NetRequestAssetReplace (event.asset->id,
                                                     GetFileExtension (event.path),
                                                     fileData, fileSize);
-                UnloadFileData (fileData);
+                free (fileData);
                 if (!sent) UiShowError (&ui, "更换素材失败");
                 break;
             }
