@@ -18,7 +18,7 @@
 #include "user.h"
 #include "view.h"
 
-#define WEB_DEFAULT_SERVER "wss://dsk.cwinf.top"
+#define WEB_DEFAULT_SERVER "wss://dsk.cwinf.top/dsk/"
 
 static ClientFrameState webFrame;
 static const char *webError;
