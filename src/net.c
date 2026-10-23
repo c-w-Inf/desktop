@@ -2091,7 +2091,7 @@ static void ClientResolved (uv_getaddrinfo_t *request, int status,
                   result->ai_addrlen >= sizeof (struct sockaddr_in);
     if (resolve->ok)
         memcpy (&resolve->address, result->ai_addr, sizeof (resolve->address));
-    uv_freeaddrinfo (result);
+    if (result != NULL) uv_freeaddrinfo (result);
 }
 
 static void ClientConnected (uv_connect_t *request, int status) {

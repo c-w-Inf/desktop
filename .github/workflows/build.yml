@@ -33,7 +33,7 @@ jobs:
         run: cmake --build build
       - name: Server smoke test
         run: |
-          ./image_canvas --server --port 7888 > server.log 2>&1 &
+          ./image_canvas --server --port 7888 --save ci.dsk > server.log 2>&1 &
           pid=$!
           for i in $(seq 1 30); do
             grep -q "listening" server.log && break
@@ -59,6 +59,7 @@ jobs:
           PY
           kill -TERM "$pid" 2>/dev/null || true
           wait "$pid" 2>/dev/null || true
+          test -s ci.dsk
 
   windows:
     runs-on: windows-latest
@@ -98,6 +99,11 @@ jobs:
           kill "$pid" 2>/dev/null || true
           taskkill.exe //F //IM image_canvas.exe >/dev/null 2>&1 || true
           test "$ok" = 1
+      - name: Save smoke test
+        run: |
+          printf 'stop\n' | ./image_canvas.exe --server --port 7889 --control-stdin --save ci.dsk > save.log 2>&1
+          cat save.log
+          test -s ci.dsk
       - name: Package
         run: |
           mkdir dist
