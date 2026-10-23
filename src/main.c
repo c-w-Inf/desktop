@@ -292,22 +292,6 @@ static void BringObjectToFront (Object *object) {
     NetRequestObjectFront (object->id);
 }
 
-static Object *AcquireObjectLock (Object *object, bool *acquired) {
-    *acquired = false;
-    if (ObjectLockedBySelf (object)) return object;
-
-    u64 id = object->id;
-    bool locked = NetLockObject (id);
-    Object *current = EntityFind (id);
-    if (!locked) return NULL;
-
-    *acquired = true;
-    if (current == NULL) {
-        NetUnlockObjectSilent (id);
-        return NULL;
-    }
-    return current;
-}
 
 static bool SceneIsEmpty (void) {
     IdGroup assets = AssetIds ();
@@ -391,6 +375,82 @@ static void DrawNetCursors (const Ui *ui, const View *view) {
                     20.0f, 0.0f, color);
     }
     IdGroupUnload (&ids);
+}
+
+typedef struct {
+    char *path;
+    Vector2 position;
+} DropItem;
+
+static DropItem *dropItems;
+static int dropCount;
+static int dropCapacity;
+static bool dropInProgress;
+static bool lockEventReady;
+static bool lockEventAcquired;
+
+static void OnLockDone (bool acquired) {
+    lockEventReady = true;
+    lockEventAcquired = acquired;
+}
+
+static void DropQueueClear (void) {
+    for (int i = 0; i < dropCount; i++) free (dropItems[i].path);
+    free (dropItems);
+    dropItems = NULL;
+    dropCount = 0;
+    dropCapacity = 0;
+}
+
+static bool DropQueuePush (const char *path, Vector2 position) {
+    if (dropCount == dropCapacity) {
+        int capacity = dropCapacity == 0 ? 8 : dropCapacity * 2;
+        DropItem *items = realloc (dropItems, (size_t)capacity * sizeof (*items));
+        if (items == NULL) return false;
+        dropItems = items;
+        dropCapacity = capacity;
+    }
+    dropItems[dropCount].path = StrDup (path);
+    if (dropItems[dropCount].path == NULL) return false;
+    dropItems[dropCount].position = position;
+    dropCount++;
+    return true;
+}
+
+static void DrawBusySpinner (const Ui *ui) {
+    float x = GetScreenWidth () - 34.0f;
+    float y = GetScreenHeight () - 38.0f;
+    float angle = (float)(GetTime () * 240.0);
+    DrawRing ((Vector2){x, y}, 11.0f, 14.0f, angle, angle + 260.0f,
+              24, (Color){40, 90, 180, 255});
+    const char *text = "处理中";
+    Vector2 size = MeasureTextEx (ui->font, text, 16.0f, 0.0f);
+    DrawTextEx (ui->font, text, (Vector2){x - size.x - 10.0f, y - size.y * 0.5f},
+                16.0f, 0.0f, (Color){40, 90, 180, 255});
+}
+
+static void StartNextDrop (void) {
+    while (dropCount > 0) {
+        DropItem item = dropItems[0];
+        dropItems[0] = dropItems[--dropCount];
+        if (NetRequestAssetObject (item.path, item.position, OnLockDone)) {
+            free (item.path);
+            dropInProgress = true;
+            return;
+        }
+        free (item.path);
+    }
+    dropInProgress = false;
+}
+
+static void DrawBusyFrame (Ui *ui, View *view, Object *chosen) {
+    BeginDrawing ();
+    ClearBackground (WHITE);
+    ViewDraw (view, chosen, ui->font);
+    DrawNetCursors (ui, view);
+    UiDraw (ui);
+    DrawBusySpinner (ui);
+    EndDrawing ();
 }
 
 int main (int argc, char **argv) {
@@ -518,11 +578,13 @@ int main (int argc, char **argv) {
     bool closeAfterConnect = false;
     u64 sceneVersion = NetClientSceneVersion ();
 
-    while (!WindowShouldClose ()) {
+    while (1) {
+        bool closeRequested = WindowShouldClose ();
         AppLoopPump ();
 
         ViewUpdateViewport (&view);
 
+        bool wasPending = NetClientLockPending ();
         int update = NetClientUpdate ();
         if (update & NET_UPDATE_REJECTED) {
             break;
@@ -562,6 +624,32 @@ int main (int argc, char **argv) {
         }
         if (!NetClientConnected ()) break;
 
+        if (lockEventReady) {
+            lockEventReady = false;
+            if (dropInProgress) {
+                dropInProgress = false;
+                StartNextDrop ();
+            } else if (lockEventAcquired) {
+                u64 lockedId = NetClientLockedObjectId ();
+                Object *locked = EntityFind (lockedId);
+                if (locked != NULL) {
+                    chosen = locked;
+                    suppressCanvasInput = IsMouseButtonDown (MOUSE_BUTTON_LEFT);
+                    if (ui.objectManagerOpen) UiSelectObject (&ui, locked);
+                    else BringObjectToFront (locked);
+                }
+            }
+        }
+        if (wasPending) {
+            if (IsFileDropped ()) {
+                FilePathList files = LoadDroppedFiles ();
+                UnloadDroppedFiles (files);
+            }
+            DrawBusyFrame (&ui, &view, chosen);
+            continue;
+        }
+        if (closeRequested) break;
+
         bool wasModal = UiIsModal (&ui);
         UiEvent event = UiUpdate (&ui);
         bool isModal = UiIsModal (&ui);
@@ -579,16 +667,11 @@ int main (int argc, char **argv) {
                 chosen = NULL;
                 dragged = false;
                 if (!ObjectLockedBySelf (event.object)) {
-                    bool acquired = false;
-                    event.object = AcquireObjectLock (event.object, &acquired);
-                    if (event.object == NULL) {
-                        UiObjectDeleted (&ui);
-                        break;
-                    }
-                }
-                // 物件管理器里选中只锁定；画布/右键选中才置顶。
-                if (!ui.objectManagerOpen)
+                    if (!NetRequestLock (event.object->id, OnLockDone))
+                        UiShowError (&ui, "锁定物件失败");
+                } else if (!ui.objectManagerOpen) {
                     BringObjectToFront (event.object);
+                }
                 break;
             }
             case UI_ACTION_RUN_MENU:
@@ -651,16 +734,13 @@ int main (int argc, char **argv) {
                 if (!NetRequestExport (event.path))
                     UiShowError (&ui, "导出存档失败");
                 break;
-            case UI_ACTION_IMPORT: {
-                Asset *asset = NetCreateAsset (event.path);
-                if (asset != NULL) {
-                    UiOpenAssetManager (&ui);
-                    UiSelectAsset (&ui, asset);
-                } else {
+            case UI_ACTION_IMPORT:
+                if (!NetRequestAssetAdd (event.path)) {
                     UiShowError (&ui, "导入素材失败");
+                } else {
+                    UiOpenAssetManager (&ui);
                 }
                 break;
-            }
             case UI_ACTION_CREATE_OBJECT: {
                 Object *previous = ui.selectedObject;
                 if (previous != NULL) {
@@ -669,30 +749,21 @@ int main (int argc, char **argv) {
                     ui.selectedObject = NULL;
                 }
                 Vector2 center = view.cam.target;
-                Object *object = NetCreateObject (center);
-                if (object != NULL)
-                    UiSelectObject (&ui, object);
-                else
+                if (!NetRequestObjectCreate (center, OnLockDone))
                     UiShowError (&ui, "新建物件失败");
                 break;
             }
             case UI_ACTION_RENAME_OBJECT: {
-                u64 id = event.object->id;
-                bool acquired = false;
-                event.object = AcquireObjectLock (event.object, &acquired);
-                if (event.object == NULL) break;
+                if (!ObjectLockedBySelf (event.object)) break;
                 if (ObjectRename (event.object, event.objectName))
                     NetPublishObjectUpsert (event.object);
                 else
                     UiShowError (&ui, "重命名失败，名称已存在");
-                if (acquired) NetUnlockObjectSilent (id);
                 break;
             }
             case UI_ACTION_DELETE_OBJECT: {
+                if (!ObjectLockedBySelf (event.object)) break;
                 u64 id = event.object->id;
-                bool acquired = false;
-                event.object = AcquireObjectLock (event.object, &acquired);
-                if (event.object == NULL) break;
                 if (chosen == event.object) chosen = NULL;
                 dragged = false;
                 if (ObjectDelete (event.object)) {
@@ -700,7 +771,6 @@ int main (int argc, char **argv) {
                     NetRequestObjectDelete (id);
                 } else {
                     UiShowError (&ui, "删除物件失败");
-                    if (acquired) NetUnlockObjectSilent (id);
                 }
                 break;
             }
@@ -760,18 +830,13 @@ int main (int argc, char **argv) {
                     UiShowError (&ui, "排序素材失败");
                 }
                 break;
-            case UI_ACTION_SET_OBJECT_LAYER: {
-                u64 id = event.object->id;
-                bool acquired = false;
-                event.object = AcquireObjectLock (event.object, &acquired);
-                if (event.object == NULL) break;
+            case UI_ACTION_SET_OBJECT_LAYER:
+                if (!ObjectLockedBySelf (event.object)) break;
                 if (ObjectSetLayer (event.object, event.layer))
                     NetPublishObjectUpsert (event.object);
                 else
                     UiShowError (&ui, "修改层数失败");
-                if (acquired) NetUnlockObjectSilent (id);
                 break;
-            }
             case UI_ACTION_RENAME_ASSET:
                 if (!NetRequestAssetRename (event.asset->id, event.assetName))
                     UiShowError (&ui, "重命名失败");
@@ -840,7 +905,7 @@ int main (int argc, char **argv) {
 
         Vector2 world = ViewScreenToWorld (&view, mouse);
 
-        // 拖入图片：正常时添加素材并创建物件；弹窗打开时拒绝并提示
+        // 拖入图片：素材、物件和锁定由服务端一次完成
         if (IsFileDropped ()) {
             FilePathList files = LoadDroppedFiles ();
 
@@ -859,23 +924,10 @@ int main (int argc, char **argv) {
                     }
 
                     Vector2 position = {world.x + i * 20.0f, world.y + i * 20.0f};
-                    Asset *asset = NetCreateAsset (path);
-                    if (asset == NULL) {
-                        failed++;
-                        continue;
-                    }
-                    Object *object = NetCreateObject (position);
-                    if (object == NULL) {
-                        failed++;
-                        continue;
-                    }
-                    if (!NetLockObject (object->id)) {
-                        failed++;
-                        continue;
-                    }
-                    if (!SendObjectAssetAdd (object, asset->id)) failed++;
-                    NetUnlockObjectSilent (object->id);
+                    if (!DropQueuePush (path, position)) failed++;
                 }
+                if (!dropInProgress && !NetClientLockPending ())
+                    StartNextDrop ();
                 if (failed > 0) UiShowError (&ui, "有文件导入失败");
             } else {
                 UiShowError (&ui, "弹窗打开时不能拖入文件");
@@ -895,68 +947,44 @@ int main (int argc, char **argv) {
         bool leftDown = IsMouseButtonDown (MOUSE_BUTTON_LEFT);
 
         if (!event.mouseCaptured && !suppressCanvasInput) {
-            // 只有在画布上按下左键才开始拖动；弹窗按钮残留的 leftDown 不能触发拖动
             if (IsMouseButtonPressed (MOUSE_BUTTON_LEFT)) {
                 Object *picked = ObjectPick (world);
-                bool lockedByOther = picked != NULL && picked->lockOwnerId != 0 &&
-                                     picked->lockOwnerId != NetClientUserId ();
-                if (lockedByOther) {
+                if (picked == NULL) {
+                    if (chosen != NULL) NetUnlockObject (chosen->id);
+                    chosen = NULL;
+                    dragged = true;
+                    dragMoved = false;
+                } else if (picked->lockOwnerId != 0 &&
+                           picked->lockOwnerId != NetClientUserId ()) {
                     suppressCanvasInput = true;
-                    lastCanvasClickId = 0;
-                } else {
+                } else if (ObjectLockedBySelf (picked)) {
                     double now = GetTime ();
-                    bool doubleClick = picked != NULL &&
-                                       picked->id == lastCanvasClickId &&
-                                       now - lastCanvasClickTime <= 0.35;
-                    if (doubleClick) {
+                    if (picked->id == lastCanvasClickId &&
+                        now - lastCanvasClickTime <= 0.35) {
                         chosen = picked;
-
-                        bool opened = true;
-                        if (!ObjectLockedBySelf (chosen)) {
-                            bool acquired = false;
-                            chosen = AcquireObjectLock (chosen, &acquired);
-                            if (chosen == NULL) opened = false;
-                        }
-
-                        if (opened) {
-                            UiOpenObjectAssets (&ui, chosen);
-                            BringObjectToFront (chosen);
-                        }
+                        UiOpenObjectAssets (&ui, picked);
                         suppressCanvasInput = true;
                         lastCanvasClickId = 0;
                         lastCanvasClickTime = 0.0;
                     } else {
-                        if (picked != chosen) {
-                            if (picked == NULL && chosen != NULL)
-                                NetUnlockObject (chosen->id);
-                            chosen = picked;
-                        }
-
-                        if (chosen != NULL) {
-                            bool acquired = false;
-                            chosen = AcquireObjectLock (chosen, &acquired);
-                            if (chosen == NULL) {
-                                suppressCanvasInput = true;
-                            } else {
-                                BringObjectToFront (chosen);
-                            }
-                        }
-
-                        if (chosen != NULL)
-                            grab = Vector2Subtract (world, chosen->pos);
-                        lastCanvasClickId = (chosen != NULL && picked != NULL)
-                                                ? picked->id : 0;
+                        chosen = picked;
+                        grab = Vector2Subtract (world, picked->pos);
+                        dragged = true;
+                        dragMoved = false;
+                        lastCanvasClickId = picked->id;
                         lastCanvasClickTime = now;
+                        BringObjectToFront (picked);
                     }
+                } else if (!NetRequestLock (picked->id, OnLockDone)) {
+                    suppressCanvasInput = true;
+                } else {
+                    chosen = NULL;
+                    dragged = false;
+                    suppressCanvasInput = true;
                 }
             }
 
             if (!suppressCanvasInput) {
-                if (IsMouseButtonPressed (MOUSE_BUTTON_LEFT)) {
-                    dragged = true;
-                    dragMoved = false;
-                }
-
                 bool canDrag = chosen == NULL || ObjectLockedBySelf (chosen);
                 if (dragged && leftDown && canDrag) {
                     if (chosen != NULL) {
@@ -973,25 +1001,20 @@ int main (int argc, char **argv) {
 
                 if (IsMouseButtonPressed (MOUSE_BUTTON_RIGHT)) {
                     Object *object = ObjectPick (world);
-                    bool lockedByOther = object != NULL && object->lockOwnerId != 0 &&
-                                         object->lockOwnerId != NetClientUserId ();
-                    if (lockedByOther) {
-                        // 被其他客户端占用：保持无操作，不提示
-                    } else if (object != NULL) {
-                        if (object != chosen)
-                            chosen = object;
-
-                        if (chosen != NULL) {
-                            bool acquired = false;
-                            chosen = AcquireObjectLock (chosen, &acquired);
-                        }
-
-                        if (chosen != NULL) {
-                            BringObjectToFront (chosen);
-                            UiOpenObjectContext (&ui, chosen, mouse);
-                        }
-                    } else {
+                    if (object == NULL) {
                         UiOpenGlobalContext (&ui, mouse);
+                    } else if (object->lockOwnerId != 0 &&
+                               object->lockOwnerId != NetClientUserId ()) {
+                        /* 被其他客户端占用：无操作 */
+                    } else if (ObjectLockedBySelf (object)) {
+                        chosen = object;
+                        BringObjectToFront (object);
+                        UiOpenObjectContext (&ui, object, mouse);
+                    } else if (!NetRequestLock (object->id, OnLockDone)) {
+                        suppressCanvasInput = true;
+                    } else {
+                        chosen = NULL;
+                        suppressCanvasInput = true;
                     }
                 }
             } else {
@@ -1051,6 +1074,7 @@ int main (int argc, char **argv) {
 
     NetClientDisconnect ();
     StopLocalServer (&localServer);
+    DropQueueClear ();
     CloseAppLoop ();
     ViewUnload (&view);
     UserUnload ();

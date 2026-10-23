@@ -15,6 +15,8 @@
 #define NET_UPDATE_ASSET_DELETE_FAILED 16
 #define NET_UPDATE_LOCK_LOST 32
 
+typedef void (*NetLockDoneFn)(bool acquired);
+
 /* ---------- 初始化 / 销毁 ---------- */
 bool NetClientConnect (const char *host, int port, const char *username);
 bool NetClientConnected (void);
@@ -69,8 +71,12 @@ bool NetRequestMenu (u64 id, int index, const char *name);
 bool NetRequestExport (const char *path);
 /* 请求服务端把 path 中的存档增量合并到当前场景。 */
 bool NetRequestImport (const char *path);
-Asset *NetCreateAsset (const char *path);
-Object *NetCreateObject (Vector2 center);
+bool NetRequestAssetAdd (const char *path);
+bool NetRequestAssetObject (const char *path, Vector2 position,
+                            NetLockDoneFn done);
+bool NetRequestObjectCreate (Vector2 center, NetLockDoneFn done);
+bool NetRequestLock (u64 id, NetLockDoneFn done);
+bool NetClientLockPending (void);
 bool NetPublishCursor (Vector2 worldPos);
 bool NetLockObject (u64 id);
 /* 用户主动释放锁；服务端会先执行物件的 touched 回调。 */

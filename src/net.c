@@ -51,6 +51,7 @@
 #define NET_LOCK_FAILED 32
 #define NET_DRAG_UPDATE 33
 #define NET_UNLOCK_NOTIFY 34
+#define NET_REQ_ASSET_OBJECT 35
 #define NET_CURSOR 14
 #define NET_LOCK 15
 #define NET_UNLOCK 16
@@ -865,6 +866,7 @@ static void ServerBroadcastObjectStateForAll (const Object *object) {
 }
 
 static void ServerRunObjectEvent (u64 id, const char *event, u64 userId);
+static void ServerLockObject (int clientIndex, u64 id);
 
 static void ServerReleaseLocks (u64 userId, bool notify) {
     IdGroup ids = ObjectIds ();
@@ -937,7 +939,10 @@ static bool ServerHandleHello (ServerClient *client, int clientIndex,
     return true;
 }
 
-static bool ServerApplyAssetAdd (Reader *reader, int clientIndex) {
+static bool ServerApplyObjectCreate (Reader *reader, int clientIndex);
+
+static bool ServerCreateAsset (Reader *reader, int clientIndex,
+                              u64 *requestIdOut, u64 *assetIdOut) {
     u64 requestId;
     char requested[256];
     char ext[8];
@@ -949,7 +954,6 @@ static bool ServerApplyAssetAdd (Reader *reader, int clientIndex) {
         !ReaderAvailable (reader, size)) return false;
 
     u64 id = ServerNewEntityId ();
-
     char name[256];
     ServerMakeUniqueName (requested, name, sizeof (name), false, 0);
 
@@ -967,8 +971,51 @@ static bool ServerApplyAssetAdd (Reader *reader, int clientIndex) {
     }
     ServerBroadcast (frame.data, frame.len);
     BufferFree (&frame);
+    if (requestIdOut != NULL) *requestIdOut = requestId;
+    if (assetIdOut != NULL) *assetIdOut = id;
     return true;
 }
+
+static bool ServerApplyAssetAdd (Reader *reader, int clientIndex) {
+    return ServerCreateAsset (reader, clientIndex, NULL, NULL);
+}
+
+static bool ServerApplyAssetObject (Reader *reader, int clientIndex) {
+    u64 requestId = 0;
+    u64 assetId = 0;
+    if (!ServerCreateAsset (reader, clientIndex, &requestId, &assetId))
+        return false;
+
+    char objectName[256];
+    float x, y;
+    uint32_t layer;
+    u64 timestamp;
+    if (!ReaderString (reader, objectName, sizeof (objectName)) ||
+        !ReaderF32 (reader, &x) || !ReaderF32 (reader, &y) ||
+        !ReaderU32 (reader, &layer) || !ReaderU64 (reader, &timestamp) ||
+        reader->pos != reader->len) return false;
+
+    Buffer payload = {0};
+    Buffer frame = {0};
+    bool ok = BufferPutU64 (&payload, requestId) &&
+              BufferPutString (&payload, objectName) &&
+              BufferPutF32 (&payload, x) && BufferPutF32 (&payload, y) &&
+              BufferPutU32 (&payload, layer) &&
+              BufferPutU64 (&payload, timestamp) &&
+              BufferPutU32 (&payload, 1) && BufferPutU64 (&payload, assetId) &&
+              FrameMake (&frame, NET_REQ_OBJECT_CREATE, &payload);
+    BufferFree (&payload);
+    if (!ok) {
+        BufferFree (&frame);
+        return false;
+    }
+    Reader objectReader = {frame.data + 5, frame.len - 5, 0};
+    bool result = ServerApplyObjectCreate (&objectReader, clientIndex);
+    BufferFree (&frame);
+    return result;
+}
+
+static bool ServerApplyObjectCreate (Reader *reader, int clientIndex);
 
 static bool ServerApplyAssetRename (Reader *reader, int clientIndex) {
     u64 id;
@@ -1124,6 +1171,7 @@ static bool ServerApplyObjectCreate (Reader *reader, int clientIndex) {
         ServerClientEnqueue (&serverClients[i], frame.data, frame.len);
         BufferFree (&frame);
     }
+    ServerLockObject (clientIndex, id);
     return true;
 }
 
@@ -1282,6 +1330,44 @@ static void ServerRunObjectEvent (u64 id, const char *event, u64 userId) {
     TextBufferFree (&error);
 }
 
+static void ServerLockObject (int clientIndex, u64 id) {
+    Object *object = ServerObjectFind (id);
+    if (object == NULL) return;
+
+    u64 userId = serverClients[clientIndex].userId;
+    if (object->lockOwnerId != 0 && object->lockOwnerId != userId) {
+        ServerSendLockState (clientIndex, id, object->lockOwnerId);
+        return;
+    }
+    if (object->lockOwnerId == userId && userId != 0) {
+        ServerSendLockState (clientIndex, id, object->lockOwnerId);
+        return;
+    }
+
+    ServerReleaseLocks (userId, false);
+    object = ServerObjectFind (id);
+    if (object == NULL) return;
+    object->lockOwnerId = userId;
+    pendingLockClient = clientIndex;
+    pendingLockObjectId = id;
+    pendingLockFailureSent = false;
+    ServerRunObjectEvent (id, "ontouch", userId);
+    bool failureSent = pendingLockFailureSent;
+    pendingLockClient = -1;
+    pendingLockObjectId = 0;
+    pendingLockFailureSent = false;
+
+    Object *current = ServerObjectFind (id);
+    if (current != NULL && current->lockOwnerId == userId) {
+        ServerBroadcastLockState (id, userId);
+    } else if (!failureSent) {
+        Buffer frame = {0};
+        if (FrameObjectLock (&frame, NET_LOCK_FAILED, id))
+            ServerClientEnqueue (&serverClients[clientIndex], frame.data, frame.len);
+        BufferFree (&frame);
+    }
+}
+
 static bool ServerApplyLock (Reader *reader, int clientIndex, bool unlock,
                              bool notify) {
     u64 id;
@@ -1304,37 +1390,7 @@ static bool ServerApplyLock (Reader *reader, int clientIndex, bool unlock,
         return true;
     }
 
-    if (object->lockOwnerId != 0 && object->lockOwnerId != userId) {
-        ServerSendLockState (clientIndex, id, object->lockOwnerId);
-        return true;
-    }
-    if (object->lockOwnerId == userId && userId != 0) {
-        ServerSendLockState (clientIndex, id, object->lockOwnerId);
-        return true;
-    }
-
-    ServerReleaseLocks (userId, false);
-    object = ServerObjectFind (id);
-    if (object == NULL) return true;
-    object->lockOwnerId = userId;
-    pendingLockClient = clientIndex;
-    pendingLockObjectId = id;
-    pendingLockFailureSent = false;
-    ServerRunObjectEvent (id, "ontouch", userId);
-    bool failureSent = pendingLockFailureSent;
-    pendingLockClient = -1;
-    pendingLockObjectId = 0;
-    pendingLockFailureSent = false;
-
-    Object *current = ServerObjectFind (id);
-    if (current != NULL && current->lockOwnerId == userId) {
-        ServerBroadcastLockState (id, userId);
-    } else if (!failureSent) {
-        Buffer frame = {0};
-        if (FrameObjectLock (&frame, NET_LOCK_FAILED, id))
-            ServerClientEnqueue (&serverClients[clientIndex], frame.data, frame.len);
-        BufferFree (&frame);
-    }
+    ServerLockObject (clientIndex, id);
     return true;
 }
 
@@ -1537,6 +1593,9 @@ static bool ServerApplyFrame (uint8_t type, const unsigned char *data, size_t le
     switch (type) {
         case NET_REQ_ASSET_ADD:
             ok = ServerApplyAssetAdd (&reader, clientIndex);
+            break;
+        case NET_REQ_ASSET_OBJECT:
+            ok = ServerApplyAssetObject (&reader, clientIndex);
             break;
         case NET_ASSET_RENAME:
             ok = ServerApplyAssetRename (&reader, clientIndex);
@@ -1927,19 +1986,18 @@ static uv_write_t clientWriteRequest;
 static bool clientWriting;
 static int clientPendingFlags;
 static u64 nextRequestId = 1;
-static u64 waitingRequestId;
-static u64 responseAssetId;
-static u64 responseObjectId;
-static bool responseReady;
+static u64 objectRequestId;
 static u64 clientUserId;
 static u64 clientLockedId;
 static u64 pendingLockId;
-static bool lockRequestFailed;
+static NetLockDoneFn lockDone;
+static int lockResult;
+static double lockStarted;
+static double lockTimeout;
 static u64 lockLostId;
 static u64 clientSceneVersion;
 
 static bool ParseClientFrames (int *flags);
-static bool WaitForResponse (const char *what, char *error, int errorSize);
 static void ClientCloseNow (void);
 static void ClientFlush (void);
 static void ClientOnWriteDone (uv_write_t *request, int status);
@@ -2005,7 +2063,9 @@ static void ClientOnClosed (uv_handle_t *handle) {
     clientUserId = 0;
     clientLockedId = 0;
     pendingLockId = 0;
-    lockRequestFailed = false;
+    objectRequestId = 0;
+    lockDone = NULL;
+    lockResult = 0;
     BufferFree (&clientIn);
     BufferFree (&clientOut);
     BufferFree (&clientWriteData);
@@ -2044,7 +2104,9 @@ static void ClientCloseNow (void) {
     }
     clientUserId = 0;
     pendingLockId = 0;
-    lockRequestFailed = false;
+    objectRequestId = 0;
+    lockDone = NULL;
+    lockResult = 0;
 }
 
 static void ClientWaitClosed (int milliseconds) {
@@ -2061,6 +2123,10 @@ u64 NetClientUserId (void) {
 
 u64 NetClientLockedObjectId (void) {
     return clientLockedId;
+}
+
+bool NetClientLockPending (void) {
+    return lockDone != NULL;
 }
 
 u64 NetClientLockLostId (void) {
@@ -2114,8 +2180,8 @@ bool NetClientConnect (const char *host, int port, const char *username) {
     UserUnload ();
     clientPendingFlags = NET_UPDATE_NONE;
     nextRequestId = 1;
-    waitingRequestId = 0;
-    responseReady = false;
+    objectRequestId = 0;
+    pendingLockId = 0;
 
     if (!clientLoopInitialized) {
         if (uv_loop_init (&clientLoop) != 0) return false;
@@ -2187,12 +2253,15 @@ bool NetClientConnected (void) {
 void NetClientDisconnect (void) {
     ClientCloseNow ();
 }
-Object *NetCreateObject (Vector2 center) {
+bool NetRequestObjectCreate (Vector2 center, NetLockDoneFn done) {
+    if (clientLockedId != 0) NetUnlockObject (clientLockedId);
     u64 requestId = nextRequestId++;
-    waitingRequestId = requestId;
-    responseReady = false;
-    responseAssetId = 0;
-    responseObjectId = 0;
+    objectRequestId = requestId;
+    lockDone = done;
+    lockResult = 0;
+    pendingLockId = 0;
+    lockStarted = GetTime ();
+    lockTimeout = 30.0;
 
     u64 timestamp = (u64)(GetTime () * 1000000.0);
     if (timestamp == 0) timestamp = 1;
@@ -2210,19 +2279,14 @@ Object *NetCreateObject (Vector2 center) {
     BufferFree (&payload);
     if (!ok) {
         BufferFree (&frame);
-        waitingRequestId = 0;
-        return NULL;
+        lockDone = NULL;
+        return false;
     }
     if (!ClientSendFrame (&frame)) {
-        waitingRequestId = 0;
-        return NULL;
+        lockDone = NULL;
+        return false;
     }
-    if (!WaitForResponse ("等待物件响应", NULL, 0)) {
-        waitingRequestId = 0;
-        return NULL;
-    }
-    waitingRequestId = 0;
-    return EntityFind (responseObjectId);
+    return true;
 }
 
 bool NetRequestAssetRename (u64 id, const char *name) {
@@ -2382,44 +2446,24 @@ bool NetRequestObjectDelete (u64 id) {
     return ClientSendFrame (&frame);
 }
 
-static bool WaitForResponse (const char *what, char *error, int errorSize) {
-    int elapsed = 0;
-    while (elapsed < 30000) {
-        if (responseReady) return true;
-        if (!NetClientConnected ()) {
-            if (error != NULL && errorSize > 0)
-                snprintf (error, (size_t)errorSize, "服务器连接已断开");
-            return false;
-        }
-        ClientPump (50);
-        elapsed += 50;
-    }
-    if (error != NULL && errorSize > 0)
-        snprintf (error, (size_t)errorSize, "%s超时", what);
-    return false;
-}
 
-Asset *NetCreateAsset (const char *path) {
+bool NetRequestAssetAdd (const char *path) {
     int size = 0;
     unsigned char *data = ReadFileBytes (path, &size);
     if (data == NULL || size <= 0) {
         free (data);
-        return NULL;
+        return false;
     }
 
     const char *ext = GetFileExtension (path);
     Image image = LoadImageFromMemory (ext, data, size);
     if (image.data == NULL) {
         free (data);
-        return NULL;
+        return false;
     }
     UnloadImage (image);
 
     u64 requestId = nextRequestId++;
-    waitingRequestId = requestId;
-    responseReady = false;
-    responseAssetId = 0;
-    responseObjectId = 0;
 
     Buffer payload = {0};
     Buffer frame = {0};
@@ -2433,19 +2477,68 @@ Asset *NetCreateAsset (const char *path) {
     free (data);
     if (!ok) {
         BufferFree (&frame);
-        waitingRequestId = 0;
-        return NULL;
+        return false;
     }
     if (!ClientSendFrame (&frame)) {
-        waitingRequestId = 0;
-        return NULL;
+        return false;
     }
-    if (!WaitForResponse ("等待素材响应", NULL, 0)) {
-        waitingRequestId = 0;
-        return NULL;
+    return true;
+}
+
+bool NetRequestAssetObject (const char *path, Vector2 position,
+                            NetLockDoneFn done) {
+    if (clientLockedId != 0) NetUnlockObject (clientLockedId);
+    int size = 0;
+    unsigned char *data = ReadFileBytes (path, &size);
+    if (data == NULL || size <= 0) {
+        free (data);
+        return false;
     }
-    waitingRequestId = 0;
-    return EntityFind (responseAssetId);
+
+    const char *ext = GetFileExtension (path);
+    Image image = LoadImageFromMemory (ext, data, size);
+    if (image.data == NULL) {
+        free (data);
+        return false;
+    }
+    UnloadImage (image);
+
+    u64 requestId = nextRequestId++;
+    objectRequestId = requestId;
+    lockDone = done;
+    lockResult = 0;
+    pendingLockId = 0;
+    lockStarted = GetTime ();
+    lockTimeout = 30.0;
+
+    u64 timestamp = (u64)(GetTime () * 1000000.0);
+    if (timestamp == 0) timestamp = 1;
+
+    Buffer payload = {0};
+    Buffer frame = {0};
+    bool ok = BufferPutU64 (&payload, requestId) &&
+              BufferPutString (&payload, "asset") &&
+              BufferPutString (&payload, ext) &&
+              BufferPutU32 (&payload, (uint32_t)size) &&
+              BufferAppend (&payload, data, (size_t)size) &&
+              BufferPutString (&payload, "object") &&
+              BufferPutF32 (&payload, position.x) &&
+              BufferPutF32 (&payload, position.y) &&
+              BufferPutU32 (&payload, 0) &&
+              BufferPutU64 (&payload, timestamp) &&
+              FrameMake (&frame, NET_REQ_ASSET_OBJECT, &payload);
+    BufferFree (&payload);
+    free (data);
+    if (!ok) {
+        BufferFree (&frame);
+        lockDone = NULL;
+        return false;
+    }
+    if (!ClientSendFrame (&frame)) {
+        lockDone = NULL;
+        return false;
+    }
+    return true;
 }
 
 bool NetPublishCursor (Vector2 worldPos) {
@@ -2554,7 +2647,7 @@ void NetServerBroadcastObjectState (const Object *object) {
     ServerBroadcastObjectStateForAll (object);
 }
 
-bool NetLockObject (u64 id) {
+bool NetRequestLock (u64 id, NetLockDoneFn done) {
     u64 selfId = NetClientUserId ();
     if (selfId == 0 || id == 0) return false;
 
@@ -2562,6 +2655,11 @@ bool NetLockObject (u64 id) {
     if (object == NULL) return false;
     if (object->lockOwnerId == selfId) {
         clientLockedId = id;
+        lockDone = done;
+        pendingLockId = id;
+        lockResult = 1;
+        lockStarted = GetTime ();
+        lockTimeout = 0.0;
         return true;
     }
     if (object->lockOwnerId != 0) return false;
@@ -2574,42 +2672,16 @@ bool NetLockObject (u64 id) {
         return false;
     }
     pendingLockId = id;
-    lockRequestFailed = false;
+    lockDone = done;
+    lockResult = 0;
+    lockStarted = GetTime ();
+    lockTimeout = 2.0;
     if (!ClientSendFrame (&frame)) {
         pendingLockId = 0;
+        lockDone = NULL;
         return false;
     }
-
-    int elapsed = 0;
-    while (elapsed < 2000) {
-        if (lockRequestFailed) {
-            pendingLockId = 0;
-            return false;
-        }
-        object = EntityFind (id);
-        if (object == NULL) {
-            pendingLockId = 0;
-            return false;
-        }
-        if (object->lockOwnerId == selfId) {
-            clientLockedId = id;
-            pendingLockId = 0;
-            return true;
-        }
-        if (object->lockOwnerId != 0) {
-            pendingLockId = 0;
-            return false;
-        }
-        if (!NetClientConnected ()) {
-            pendingLockId = 0;
-            return false;
-        }
-
-        ClientPump (10);
-        elapsed += 10;
-    }
-    pendingLockId = 0;
-    return false;
+    return true;
 }
 
 static bool SendUnlockObject (u64 id, uint8_t type, bool clearLocal) {
@@ -2754,11 +2826,6 @@ static bool ApplyAssetAddDelta (Reader *reader) {
         existing = AssetAdd (name, ext, reader->data + reader->pos, (int)size, id);
     reader->pos += size;
 
-    if (requestId != 0 && requestId == waitingRequestId && existing != NULL &&
-        requesterId == NetClientUserId ()) {
-        responseAssetId = id;
-        responseReady = true;
-    }
     return true;
 }
 
@@ -2856,7 +2923,8 @@ static bool ApplyObjectState (Reader *reader, u64 id, const char *name,
     return true;
 }
 
-static bool ApplyObjectCreatedDelta (Reader *reader) {
+static bool ApplyObjectCreatedDelta (Reader *reader, int *flags) {
+    (void)flags;
     u64 requestId;
     u64 requesterId;
     u64 id;
@@ -2881,10 +2949,10 @@ static bool ApplyObjectCreatedDelta (Reader *reader) {
     if (!ApplyObjectState (reader, id, name, x, y, layer, timestamp,
                            hidden != 0, assetIndex, assetCount, &object)) return false;
 
-    if (requestId != 0 && requestId == waitingRequestId && object != NULL &&
+    if (requestId != 0 && requestId == objectRequestId && object != NULL &&
         requesterId == NetClientUserId ()) {
-        responseObjectId = id;
-        responseReady = true;
+        objectRequestId = 0;
+        if (lockDone != NULL) pendingLockId = id;
     }
     return true;
 }
@@ -2965,7 +3033,8 @@ static bool ApplyCursorDelta (Reader *reader) {
     return true;
 }
 
-static bool ApplyLockDelta (Reader *reader) {
+static bool ApplyLockDelta (Reader *reader, int *flags) {
+    (void)flags;
     u64 id;
     u64 ownerId;
     if (!ReaderU64 (reader, &id) || !ReaderU64 (reader, &ownerId))
@@ -2973,16 +3042,20 @@ static bool ApplyLockDelta (Reader *reader) {
 
     Object *object = EntityFind (id);
     if (object != NULL) object->lockOwnerId = ownerId;
-    if (ownerId == clientUserId) clientLockedId = id;
-    else if (id == clientLockedId) clientLockedId = 0;
+    if (ownerId == clientUserId) {
+        clientLockedId = id;
+        if (lockDone != NULL && id == pendingLockId) lockResult = 1;
+    } else if (id == clientLockedId) {
+        clientLockedId = 0;
+    }
     return true;
 }
 
 static bool ApplyLockFailedDelta (Reader *reader, int *flags) {
     u64 id;
     if (!ReaderU64 (reader, &id) || reader->pos != reader->len) return false;
-    if (id == pendingLockId) {
-        lockRequestFailed = true;
+    if (lockDone != NULL && id == pendingLockId) {
+        lockResult = -1;
     } else {
         lockLostId = id;
         if (id == clientLockedId) clientLockedId = 0;
@@ -3048,7 +3121,7 @@ static bool ApplyDelta (uint8_t type, const unsigned char *data, size_t length, 
             ok = ApplyAssetDeleteFailedDelta (&reader, flags);
             break;
         case NET_OBJECT_CREATED:
-            ok = ApplyObjectCreatedDelta (&reader);
+            ok = ApplyObjectCreatedDelta (&reader, flags);
             break;
         case NET_OBJECT_UPSERT:
             ok = ApplyObjectUpsertDelta (&reader);
@@ -3066,7 +3139,7 @@ static bool ApplyDelta (uint8_t type, const unsigned char *data, size_t length, 
             ok = ApplyCursorDelta (&reader);
             break;
         case NET_LOCK_STATE:
-            ok = ApplyLockDelta (&reader);
+            ok = ApplyLockDelta (&reader, flags);
             break;
         case NET_LOCK_FAILED:
             ok = ApplyLockFailedDelta (&reader, flags);
@@ -3129,6 +3202,20 @@ static bool ParseClientFrames (int *flags) {
 
 int NetClientUpdate (void) {
     if (clientLoopInitialized) ClientPump (0);
+
+    if (lockDone != NULL) {
+        bool timeout = lockTimeout > 0.0 &&
+                       GetTime () - lockStarted >= lockTimeout;
+        if (lockResult != 0 || timeout) {
+            NetLockDoneFn done = lockDone;
+            bool acquired = lockResult > 0;
+            lockDone = NULL;
+            lockResult = 0;
+            pendingLockId = 0;
+            done (acquired);
+        }
+    }
+
     int flags = clientPendingFlags;
     clientPendingFlags = NET_UPDATE_NONE;
     if (flags & NET_UPDATE_REJECTED) ClientCloseNow ();
