@@ -175,46 +175,6 @@ static bool DskUvStat (const char *path, uv_stat_t *info, bool link) {
     return true;
 }
 
-static bool DskReadDiskFile (const char *path, uint64_t expected,
-                             unsigned char **data, size_t *size) {
-    uv_fs_t request;
-    int openResult = uv_fs_open (NULL, &request, path, UV_FS_O_RDONLY, 0, NULL);
-    uv_fs_req_cleanup (&request);
-    if (openResult < 0) return false;
-
-    int fd = openResult;
-    unsigned char *bytes = expected > 0 ? malloc ((size_t)expected) : NULL;
-    if (expected > 0 && bytes == NULL) {
-        uv_fs_close (NULL, &request, fd, NULL);
-        uv_fs_req_cleanup (&request);
-        return false;
-    }
-
-    bool ok = true;
-    size_t offset = 0;
-    while (offset < (size_t)expected) {
-        size_t left = (size_t)expected - offset;
-        uv_buf_t buffer = uv_buf_init ((char *)bytes + offset,
-                                       (unsigned int)left);
-        int read = uv_fs_read (NULL, &request, fd, &buffer, 1, (int64_t)offset, NULL);
-        uv_fs_req_cleanup (&request);
-        if (read <= 0) {
-            ok = false;
-            break;
-        }
-        offset += (size_t)read;
-    }
-    uv_fs_close (NULL, &request, fd, NULL);
-    uv_fs_req_cleanup (&request);
-    if (!ok) {
-        free (bytes);
-        return false;
-    }
-    *data = bytes;
-    *size = (size_t)expected;
-    return true;
-}
-
 static bool DskReadDirectoryTree (const char *root, const char *relative,
                                   DskZip *zip, size_t *total, int depth) {
     if (depth > DSK_FOLDER_MAX_DEPTH) return false;
@@ -280,16 +240,15 @@ static bool DskReadDirectoryTree (const char *root, const char *relative,
             break;
         }
 
-        unsigned char *data = NULL;
-        size_t size = 0;
-        if (!DskReadDiskFile (childPath, (uint64_t)info.st_size, &data,
-                              &size) ||
-            !DskZipAdd (zip, childRelative, data, size)) {
+        int fileSize = 0;
+        unsigned char *data = ReadFileBytes (childPath, &fileSize);
+        if (data == NULL || (uint64_t)fileSize != (uint64_t)info.st_size ||
+            !DskZipAdd (zip, childRelative, data, (size_t)fileSize)) {
             free (data);
             ok = false;
             break;
         }
-        *total += size;
+        *total += (size_t)fileSize;
     }
     if (next != UV_EOF) ok = false;
     uv_fs_req_cleanup (&request);

@@ -47,9 +47,6 @@ add_executable(image_canvas ${IMAGE_CANVAS_SOURCES})
 target_include_directories(image_canvas PRIVATE
     src
     third_party)
-if(NOT WIN32)
-    target_include_directories(image_canvas PRIVATE third_party/raylib/include)
-endif()
 set_target_properties(image_canvas PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}")
 target_link_libraries(image_canvas PRIVATE
