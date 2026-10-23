@@ -176,6 +176,7 @@ raylib 6.2，不需要把 Linux 版 raylib 二进制放进仓库。
 | `src/menu_array.c` / `src/menu_array.h` | 内部菜单名称/函数数组操作：全局、用户和物件菜单共用同一套增删与替换逻辑 |
 | `src/user.c` / `src/user.h` | 在线用户：用户 ID、名称、光标状态和颜色，支持查找、增删和遍历 |
 | `src/strmap.c` / `src/strmap.h` | 哈希字符串 → `void *` 索引，惰性构建按名称排序的遍历视图 |
+| `src/netutils.h` / `src/netutils.c` | 跨平台传输抽象：native libuv TCP，Web 端保留 TCP 监听 stub |
 | `src/net.c` / `src/net.h` | libuv TCP 联机：无头服务器、权威场景、增量操作、物件占用、在线光标和全量快照 |
 | `src/assets.c` / `src/assets.h` | 素材库：name → id 有序索引；`Asset` 逐个 malloc 并由 entity 按 id 注册 |
 | `src/object.c` / `src/object.h` | 物件：name → id 有序索引；`Object` 逐个 malloc 并由 entity 按 id 注册，持有素材数组、层数、时间戳、位置、命中检测 |
