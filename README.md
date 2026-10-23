@@ -102,7 +102,7 @@ dsk/
 ```text
 image_canvas      编译出的二进制（不提交）
 src/              源代码
-assets/           UI 字体、脚本等宽字体及许可证
+assets/           字体许可证；字体由 CMake 查找或下载
 third_party/      tinyfiledialogs 等第三方源码
 build/            CMake 构建目录（不提交）
 .github/          GitHub Actions
@@ -474,9 +474,18 @@ cmake --build build -j
 
 ## 关于字体
 
-- 界面使用 `assets/WenQuanYiMicroHei.ttf`（WenQuanYi Micro Hei，24px）；
-- 脚本代码和 `self` 表达式使用 `assets/WenQuanYiMicroHeiMono.ttf`（WenQuanYi Micro Hei Mono，22px）；
-- 两种字体都包含常用中文、英文和符号，覆盖 UI 文案及运行时名称。
+字体文件不提交到仓库。CMake 配置时优先在系统字体目录中查找可用的中文 TTF/OTF：
+WenQuanYi、Noto Sans CJK 等；找不到时下载 Noto Sans CJK 和 Unifont 到构建目录，
+并在构建后复制为：
+
+```text
+assets/WenQuanYiMicroHei.ttf
+assets/WenQuanYiMicroHeiMono.ttf
+assets/unifont.otf
+```
+
+界面使用第一项，脚本代码和 `self` 表达式使用第二项，加载失败时回退到 Unifont。
+这些生成文件被 `.gitignore` 忽略。
 
 程序启动时按常用 Unicode 范围生成字符集，而不是每次扫描文案；素材名、物件名、
 用户名和运行时的中文提示都可以直接显示。
@@ -484,7 +493,7 @@ cmake --build build -j
 如果新字体加载失败，会回退到 `assets/unifont.otf`。
 
 字体许可：WenQuanYi Micro Hei 系列为 Apache License 2.0；Unifont 为 GPLv2+
-（含字体嵌入例外）/ SIL OFL 1.1 双许可。
+（含字体嵌入例外）/ SIL OFL 1.1 双许可；下载的 Noto CJK 为 SIL OFL 1.1。
 
 ## 操作
 

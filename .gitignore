@@ -13,3 +13,6 @@ core
 /build/
 /dist/
 /.tmp-*
+/assets/*.ttf
+/assets/*.otf
+/assets/*.ttc

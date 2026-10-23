@@ -36,6 +36,69 @@ if(NOT TARGET libzip::zip)
 endif()
 
 
+# 字体：优先使用系统字体；没有时下载到构建目录，再由 post-build 复制到 assets。
+set(FONT_PATHS
+    "${CMAKE_CURRENT_SOURCE_DIR}/assets"
+    /usr/share/fonts
+    /usr/share/fonts/truetype
+    /usr/share/fonts/opentype
+    /usr/share/fonts/truetype/wqy
+    /usr/share/fonts/wenquanyi/wqy-microhei
+    /usr/share/fonts/truetype/unifont
+    /usr/share/fonts/opentype/unifont
+    /usr/local/share/fonts
+    /Library/Fonts
+    /System/Library/Fonts
+    /System/Library/Fonts/Supplemental
+    "$ENV{WINDIR}/Fonts")
+
+find_file(IMAGE_CANVAS_UI_FONT
+    NAMES WenQuanYiMicroHei.ttf NotoSansCJKsc-Regular.otf
+          NotoSansCJK-Regular.otf
+    PATHS ${FONT_PATHS} NO_DEFAULT_PATH)
+find_file(IMAGE_CANVAS_MONO_FONT
+    NAMES WenQuanYiMicroHeiMono.ttf NotoSansMonoCJKsc-Regular.otf
+          NotoSansMonoCJK-Regular.otf
+    PATHS ${FONT_PATHS} NO_DEFAULT_PATH)
+find_file(IMAGE_CANVAS_FALLBACK_FONT
+    NAMES unifont.otf unifont.ttf Unifont.otf
+    PATHS ${FONT_PATHS} NO_DEFAULT_PATH)
+set(FONT_CACHE "${CMAKE_BINARY_DIR}/fonts")
+file(MAKE_DIRECTORY "${FONT_CACHE}")
+if(NOT IMAGE_CANVAS_UI_FONT)
+    set(IMAGE_CANVAS_UI_FONT "${FONT_CACHE}/WenQuanYiMicroHei.ttf")
+    file(DOWNLOAD
+        "https://github.com/notofonts/noto-cjk/raw/main/Sans/OTF/SimplifiedChinese/NotoSansCJKsc-Regular.otf"
+        "${IMAGE_CANVAS_UI_FONT}" STATUS _font_status)
+    list(GET _font_status 0 _font_code)
+    if(_font_code)
+        message(FATAL_ERROR "无法下载中文字体: ${_font_status}")
+    endif()
+endif()
+if(NOT IMAGE_CANVAS_MONO_FONT)
+    set(IMAGE_CANVAS_MONO_FONT "${FONT_CACHE}/NotoSansMonoCJKsc-Regular.otf")
+    file(DOWNLOAD
+        "https://github.com/notofonts/noto-cjk/raw/main/Sans/Mono/NotoSansMonoCJKsc-Regular.otf"
+        "${IMAGE_CANVAS_MONO_FONT}" STATUS _font_status)
+    list(GET _font_status 0 _font_code)
+    if(_font_code)
+        message(FATAL_ERROR "无法下载等宽字体: ${_font_status}")
+    endif()
+endif()
+if(NOT IMAGE_CANVAS_FALLBACK_FONT)
+    set(IMAGE_CANVAS_FALLBACK_FONT "${FONT_CACHE}/unifont.otf")
+    file(DOWNLOAD
+        "https://unifoundry.com/pub/unifont/unifont-16.0.04/font-builds/unifont-16.0.04.otf"
+        "${IMAGE_CANVAS_FALLBACK_FONT}" STATUS _font_status)
+    list(GET _font_status 0 _font_code)
+    if(_font_code)
+        message(FATAL_ERROR "无法下载备用字体: ${_font_status}")
+    endif()
+endif()
+message(STATUS "UI font: ${IMAGE_CANVAS_UI_FONT}")
+message(STATUS "Mono font: ${IMAGE_CANVAS_MONO_FONT}")
+message(STATUS "Fallback font: ${IMAGE_CANVAS_FALLBACK_FONT}")
+
 file(GLOB IMAGE_CANVAS_SOURCES CONFIGURE_DEPENDS src/*.c)
 
 add_library(tinyfiledialogs STATIC
@@ -54,6 +117,17 @@ target_include_directories(image_canvas PRIVATE
     third_party)
 set_target_properties(image_canvas PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}")
+add_custom_command(TARGET image_canvas POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E make_directory "${CMAKE_CURRENT_SOURCE_DIR}/assets"
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            "${IMAGE_CANVAS_UI_FONT}"
+            "${CMAKE_CURRENT_SOURCE_DIR}/assets/WenQuanYiMicroHei.ttf"
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            "${IMAGE_CANVAS_MONO_FONT}"
+            "${CMAKE_CURRENT_SOURCE_DIR}/assets/WenQuanYiMicroHeiMono.ttf"
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            "${IMAGE_CANVAS_FALLBACK_FONT}"
+            "${CMAKE_CURRENT_SOURCE_DIR}/assets/unifont.otf")
 target_link_libraries(image_canvas PRIVATE
     tinyfiledialogs
     PkgConfig::JSONC
