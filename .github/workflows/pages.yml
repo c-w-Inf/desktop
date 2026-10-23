@@ -1,0 +1,44 @@
+name: pages
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [dev]
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: mymindstorm/setup-emsdk@v14
+        with:
+          version: 3.1.64
+      - uses: actions/configure-pages@v5
+      - name: Configure
+        run: |
+          emcmake cmake -S . -B build-web -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release
+      - name: Build
+        run: cmake --build build-web
+      - name: Stage
+        run: |
+          test -f build-web/web/image_canvas.html
+          test -f build-web/web/image_canvas.data
+          ls -lh build-web/web
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: build-web/web
+      - id: deployment
+        uses: actions/deploy-pages@v4
