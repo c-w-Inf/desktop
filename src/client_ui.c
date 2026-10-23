@@ -207,27 +207,48 @@ static void DrawBusyFrame (Ui *ui, View *view, Object *chosen) {
 }
 
 
-int ClientRun (Ui *ui, View *view, bool localMode, int localPort,
-               const char *localAddress, ClientPumpFn pump,
-               ClientOpenRemoteFn openRemote, const char *program) {
+
+void ClientFrameInit (ClientFrameState *state, Ui *ui, View *view,
+                      bool localMode, int localPort, const char *localAddress,
+                      ClientPumpFn pump, ClientOpenRemoteFn openRemote,
+                      const char *program) {
+    memset (state, 0, sizeof (*state));
+    state->ui = ui;
+    state->view = view;
+    state->localMode = localMode;
+    state->localPort = localPort;
+    state->localAddress = localAddress;
+    state->pump = pump;
+    state->openRemote = openRemote;
+    state->program = program;
+    state->sceneVersion = NetClientSceneVersion ();
+    DropQueueClear ();
     if (!localMode) {
         UiSetConnectMenuVisible (ui, false);
         UiSetFileMenuVisible (ui, false);
     }
+}
 
-    Object *chosen = NULL;
-    bool dragged = false;
-    bool dragMoved = false;
-    bool suppressCanvasInput = false;
-    Vector2 grab = {0};
-    double lastCursorSend = 0.0;
-    double lastObjectSync = 0.0;
-    u64 lastCanvasClickId = 0;
-    double lastCanvasClickTime = 0.0;
-    bool closeAfterConnect = false;
-    u64 sceneVersion = NetClientSceneVersion ();
+bool ClientFrame (ClientFrameState *state) {
+    Ui *ui = state->ui;
+    View *view = state->view;
+    int localPort = state->localPort;
+    const char *localAddress = state->localAddress;
+    ClientPumpFn pump = state->pump;
+    ClientOpenRemoteFn openRemote = state->openRemote;
+    const char *program = state->program;
+#define chosen state->chosen
+#define dragged state->dragged
+#define dragMoved state->dragMoved
+#define suppressCanvasInput state->suppressCanvasInput
+#define grab state->grab
+#define lastCursorSend state->lastCursorSend
+#define lastObjectSync state->lastObjectSync
+#define lastCanvasClickId state->lastCanvasClickId
+#define lastCanvasClickTime state->lastCanvasClickTime
+#define closeAfterConnect state->closeAfterConnect
+#define sceneVersion state->sceneVersion
 
-    while (1) {
         bool closeRequested = WindowShouldClose ();
         pump ();
 
@@ -236,7 +257,7 @@ int ClientRun (Ui *ui, View *view, bool localMode, int localPort,
         bool wasPending = NetClientLockPending ();
         int update = NetClientUpdate ();
         if (update & NET_UPDATE_REJECTED) {
-            break;
+            return false;
         }
         if (update & NET_UPDATE_SCENE) {
             // 全量快照会重建所有物件，旧指针立即失效
@@ -271,7 +292,7 @@ int ClientRun (Ui *ui, View *view, bool localMode, int localPort,
             dragged = false;
             suppressCanvasInput = IsMouseButtonDown (MOUSE_BUTTON_LEFT);
         }
-        if (!NetClientConnected ()) break;
+        if (!NetClientConnected ()) return false;
 
         if (lockEventReady) {
             lockEventReady = false;
@@ -295,9 +316,9 @@ int ClientRun (Ui *ui, View *view, bool localMode, int localPort,
                 UnloadDroppedFiles (files);
             }
             DrawBusyFrame (ui, view, chosen);
-            continue;
+            return true;
         }
-        if (closeRequested) break;
+        if (closeRequested) return false;
 
         bool wasModal = UiIsModal (ui);
         UiEvent event = UiUpdate (ui);
@@ -542,7 +563,7 @@ int ClientRun (Ui *ui, View *view, bool localMode, int localPort,
             sceneVersion = NetClientSceneVersion ();
         }
 
-        if (closeAfterConnect) break;
+        if (closeAfterConnect) return false;
 
         Vector2 mouse = GetMousePosition ();
 
@@ -564,11 +585,11 @@ int ClientRun (Ui *ui, View *view, bool localMode, int localPort,
                     if (PathHasExtension (path, ".dsk") ||
                         PathIsDirectory (path)) {
                         if (!NetRequestImport (path)) failed++;
-                        continue;
+                        return true;
                     }
                     if (!PathIsImage (path)) {
                         failed++;
-                        continue;
+                        return true;
                     }
 
                     Vector2 position = {world.x + i * 20.0f, world.y + i * 20.0f};
@@ -710,7 +731,7 @@ int ClientRun (Ui *ui, View *view, bool localMode, int localPort,
             }
         }
 
-        if (!NetClientConnected ()) break;
+        if (!NetClientConnected ()) return false;
 
         BeginDrawing ();
         ClearBackground (WHITE);
@@ -718,8 +739,33 @@ int ClientRun (Ui *ui, View *view, bool localMode, int localPort,
         DrawNetCursors (ui, view);
         UiDraw (ui);
         EndDrawing ();
-    }
+#undef chosen
+#undef dragged
+#undef dragMoved
+#undef suppressCanvasInput
+#undef grab
+#undef lastCursorSend
+#undef lastObjectSync
+#undef lastCanvasClickId
+#undef lastCanvasClickTime
+#undef closeAfterConnect
+#undef sceneVersion
+    return true;
+}
 
-    DropQueueClear ();
+int ClientRun (Ui *ui, View *view, bool localMode, int localPort,
+               const char *localAddress, ClientPumpFn pump,
+               ClientOpenRemoteFn openRemote, const char *program) {
+    ClientFrameState state;
+    ClientFrameInit (&state, ui, view, localMode, localPort, localAddress,
+                     pump, openRemote, program);
+    while (ClientFrame (&state)) {
+    }
+    ClientFrameUnload (&state);
     return 0;
+}
+
+void ClientFrameUnload (ClientFrameState *state) {
+    (void)state;
+    DropQueueClear ();
 }
