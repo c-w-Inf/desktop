@@ -26,6 +26,8 @@ jobs:
         with:
           version: 3.1.64
       - uses: actions/configure-pages@v5
+        with:
+          enablement: true
       - name: Configure
         run: |
           emcmake cmake -S . -B build-web -G Ninja \
