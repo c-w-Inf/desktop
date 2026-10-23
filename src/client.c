@@ -4,6 +4,7 @@
 #include "net_common.h"
 #include "netutils.h"
 #include "ui.h"
+#include "cutils.h"
 #include "utils.h"
 
 #include <errno.h>

@@ -14,6 +14,7 @@
 #include <json-c/json.h>
 
 #include "assets.h"
+#include "cutils.h"
 
 #include <uv.h>
 #include <zip.h>

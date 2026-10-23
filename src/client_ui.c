@@ -12,6 +12,7 @@
 #include "net.h"
 #include "object.h"
 #include "user.h"
+#include "cutils.h"
 #include "utils.h"
 
 static void ReleaseOwnedObjectLock (bool notify) {

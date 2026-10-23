@@ -10,7 +10,7 @@
 #include <string.h>
 
 #include "raymath.h"
-#include "tinyfiledialogs.h"
+#include "cutils.h"
 
 #include "assets.h"
 #include "menu.h"
@@ -94,64 +94,41 @@ static bool DiscardDroppedFiles (void) {
     return true;
 }
 
-static bool DialogPath (Ui *ui, char *path, int pathSize,
-                        const char *selected, const char *failure) {
-    path[0] = '\0';
-    if (selected == NULL) return false;
-    if (strlen (selected) >= (size_t)pathSize) {
+static bool DialogSucceeded (Ui *ui, CutilsDialogResult result,
+                             const char *failure) {
+    if (result == CUTILS_DIALOG_OK) return true;
+    if (result == CUTILS_DIALOG_CANCELLED) return false;
+    if (result == CUTILS_DIALOG_TOO_LONG)
         UiShowError (ui, "路径过长");
-        return false;
-    }
-    snprintf (path, (size_t)pathSize, "%s", selected);
-    if (path[0] == '\0') {
+    else
         UiShowError (ui, failure);
-        return false;
-    }
-    return true;
+    return false;
 }
 
 static bool OpenImageDialog (Ui *ui, char *path, int pathSize) {
-    static const char *patterns[] = {
-        "*.png", "*.jpg", "*.jpeg", "*.bmp", "*.tga",
-        "*.gif", "*.qoi", "*.psd"
-    };
-    const char *selected = tinyfd_openFileDialog (
-        "选择图片", "", 8, patterns, "图片", 0);
-    bool ok = DialogPath (ui, path, pathSize, selected, "打开文件对话框失败");
+    path[0] = '\0';
+    CutilsDialogResult result = CutilsOpenImage (path, (size_t)pathSize);
+    bool ok = DialogSucceeded (ui, result, "打开文件对话框失败");
     if (DiscardDroppedFiles ()) UiShowError (ui, "弹窗打开时不能拖入文件");
     return ok;
 }
 
 static bool OpenImportDialog (Ui *ui, char *path, int pathSize) {
-    static const char *patterns[] = {
-        "*.dsk", "*.png", "*.jpg", "*.jpeg", "*.bmp",
-        "*.tga", "*.gif", "*.qoi", "*.psd"
-    };
-    const char *selected = tinyfd_openFileDialog (
-        "导入", "", 9, patterns, "支持的文件", 0);
-    return DialogPath (ui, path, pathSize, selected, "打开文件对话框失败");
+    path[0] = '\0';
+    CutilsDialogResult result = CutilsOpenImport (path, (size_t)pathSize);
+    return DialogSucceeded (ui, result, "打开文件对话框失败");
 }
 
 static bool OpenFolderDialog (Ui *ui, char *path, int pathSize) {
-    const char *selected = tinyfd_selectFolderDialog ("导入文件夹", "");
-    return DialogPath (ui, path, pathSize, selected, "打开文件夹对话框失败");
+    path[0] = '\0';
+    CutilsDialogResult result = CutilsOpenFolder (path, (size_t)pathSize);
+    return DialogSucceeded (ui, result, "打开文件夹对话框失败");
 }
 
 static bool OpenExportDialog (Ui *ui, char *path, int pathSize) {
-    static const char *patterns[] = {"*.dsk"};
-    const char *selected = tinyfd_saveFileDialog (
-        "导出存档", "image_canvas.dsk", 1, patterns, "存档");
-    if (!DialogPath (ui, path, pathSize, selected, "打开文件对话框失败"))
-        return false;
-    size_t length = strlen (path);
-    if (length < 4 || strcmp (path + length - 4, ".dsk") != 0) {
-        if ((size_t)pathSize <= length + 4) {
-            UiShowError (ui, "导出路径过长");
-            return false;
-        }
-        memcpy (path + length, ".dsk", sizeof (".dsk"));
-    }
-    return true;
+    path[0] = '\0';
+    CutilsDialogResult result = CutilsSaveDsk (path, (size_t)pathSize);
+    return DialogSucceeded (ui, result, "打开文件对话框失败");
 }
 
 static void LayoutMenus (Ui *ui) {
@@ -275,9 +252,6 @@ static Ui *activeUi;
 
 void UiInit (Ui *ui) {
     activeUi = ui;
-#ifdef _WIN32
-    tinyfd_winUtf8 = 1;
-#endif
     ui->showConnectMenu = true;
     ui->showFileMenu = true;
     ui->menuOpen = -1;

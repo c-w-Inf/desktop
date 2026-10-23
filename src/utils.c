@@ -5,10 +5,8 @@
 #include <stdlib.h>
 #include <string.h>
 #include <strings.h>
-#include <sys/stat.h>
 #include <time.h>
 
-#include <uv.h>
 
 static volatile sig_atomic_t stopRequested;
 
@@ -182,68 +180,6 @@ void TextBufferFree (TextBuffer *buffer) {
 bool PathHasExtension (const char *path, const char *extension) {
     const char *dot = strrchr (path, '.');
     return dot != NULL && strcasecmp (dot, extension) == 0;
-}
-
-bool PathIsDirectory (const char *path) {
-    if (path == NULL || path[0] == '\0') return false;
-    uv_fs_t request;
-    bool result = uv_fs_stat (NULL, &request, path, NULL) == 0 &&
-                  S_ISDIR (request.statbuf.st_mode);
-    uv_fs_req_cleanup (&request);
-    return result;
-}
-
-unsigned char *ReadFileBytes (const char *path, int *size) {
-    if (path == NULL || path[0] == '\0' || size == NULL) return NULL;
-    *size = 0;
-
-    uv_fs_t request;
-    int fd = uv_fs_open (NULL, &request, path, UV_FS_O_RDONLY, 0, NULL);
-    uv_fs_req_cleanup (&request);
-    if (fd < 0) return NULL;
-
-    if (uv_fs_fstat (NULL, &request, fd, NULL) < 0) {
-        uv_fs_req_cleanup (&request);
-        uv_fs_close (NULL, &request, fd, NULL);
-        uv_fs_req_cleanup (&request);
-        return NULL;
-    }
-    uint64_t length = request.statbuf.st_size;
-    uv_fs_req_cleanup (&request);
-    if (length == 0 || length > INT_MAX) {
-        uv_fs_close (NULL, &request, fd, NULL);
-        uv_fs_req_cleanup (&request);
-        return NULL;
-    }
-
-    unsigned char *data = malloc ((size_t)length);
-    if (data == NULL) {
-        uv_fs_close (NULL, &request, fd, NULL);
-        uv_fs_req_cleanup (&request);
-        return NULL;
-    }
-
-    size_t offset = 0;
-    bool ok = true;
-    while (offset < (size_t)length) {
-        uv_buf_t buffer = uv_buf_init ((char *)data + offset,
-                                       (unsigned int)((size_t)length - offset));
-        int read = uv_fs_read (NULL, &request, fd, &buffer, 1, (int64_t)offset, NULL);
-        uv_fs_req_cleanup (&request);
-        if (read <= 0) {
-            ok = false;
-            break;
-        }
-        offset += (size_t)read;
-    }
-    uv_fs_close (NULL, &request, fd, NULL);
-    uv_fs_req_cleanup (&request);
-    if (!ok) {
-        free (data);
-        return NULL;
-    }
-    *size = (int)length;
-    return data;
 }
 
 bool PathIsImage (const char *path) {
