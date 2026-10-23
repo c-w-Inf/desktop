@@ -1,0 +1,12 @@
+image_canvas
+obj/
+compile_commands.json
+.cache/
+.config/
+.local/
+core
+*.core
+*.dsk
+*.dsk.tmp
+
+/dsk/
