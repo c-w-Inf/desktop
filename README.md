@@ -145,6 +145,12 @@ sudo apt install cmake ninja-build pkg-config git \
 # Ubuntu 仓库没有 raylib 6.2，需要从源码构建；GitHub Actions 已包含该步骤
 ```
 
+macOS（Homebrew）：
+
+```bash
+brew install cmake ninja pkg-config raylib json-c libuv libzip
+```
+
 Windows 使用 MSYS2 UCRT64，安装：
 
 ```bash
@@ -446,8 +452,9 @@ cmake --build build
 ./image_canvas
 ```
 
-Windows 在 MSYS2 UCRT64 中执行同样的命令，生成 `image_canvas.exe`。GitHub Actions
-会构建 Linux 和 Windows 版本，并运行无头服务端冒烟测试。
+Windows 在 MSYS2 UCRT64 中执行同样的命令，生成 `image_canvas.exe`。macOS 使用
+Homebrew 安装依赖后执行同样的 CMake 命令。GitHub Actions 会构建 Linux、Windows
+和 macOS，并运行无头服务端及存档冒烟测试。
 
 服务器运行在终端中，按 Ctrl+C 结束；本地 GUI 关闭时通过 stdin 控制管道让服务端保存并退出。
 
