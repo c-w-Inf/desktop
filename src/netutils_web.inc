@@ -51,3 +51,12 @@ void NetutilClose (NetutilStream *stream) {
 void NetutilPump (int timeout_ms) {
     (void)timeout_ms;
 }
+
+bool NetutilStdinStart (NetutilStdinFn callback, void *user) {
+    (void)callback;
+    (void)user;
+    return false;
+}
+
+void NetutilStdinStop (void) {
+}

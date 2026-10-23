@@ -21,6 +21,8 @@ typedef struct {
 
 typedef void (*NetutilAcceptFn)(NetutilServer *server, NetutilStream *stream,
                                 void *user);
+typedef void (*NetutilStdinFn)(const unsigned char *data, size_t size,
+                               void *user);
 
 typedef struct {
     void (*on_connected)(NetutilStream *stream, void *user);
@@ -45,6 +47,8 @@ void NetutilSetEvents(NetutilStream *stream, const NetutilEvents *events,
 
 bool NetutilWrite(NetutilStream *stream, const void *data, size_t size);
 void NetutilClose(NetutilStream *stream);
+bool NetutilStdinStart(NetutilStdinFn callback, void *user);
+void NetutilStdinStop(void);
 
 /* Drive network events. Web implementations cannot block and return promptly. */
 void NetutilPump(int timeout_ms);

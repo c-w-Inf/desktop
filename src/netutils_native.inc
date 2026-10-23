@@ -40,6 +40,8 @@ struct NetutilServer {
 
 static uv_loop_t netutilLoop;
 static uv_timer_t netutilPumpTimer;
+static uv_pipe_t netutilStdin;
+static bool netutilStdinOpen;
 static bool netutilInitialized;
 
 static bool BufferReserve (NetutilBuffer *buffer, size_t extra) {
@@ -251,6 +253,7 @@ bool NetutilInit (void) {
 
 void NetutilShutdown (void) {
     if (!netutilInitialized) return;
+    NetutilStdinStop ();
     uv_close ((uv_handle_t *)&netutilPumpTimer, NULL);
     uv_run (&netutilLoop, UV_RUN_DEFAULT);
     uv_loop_close (&netutilLoop);
@@ -363,4 +366,48 @@ void NetutilPump (int timeout_ms) {
                     (uint64_t)timeout_ms, 0);
     uv_run (&netutilLoop, UV_RUN_ONCE);
     uv_timer_stop (&netutilPumpTimer);
+}
+
+static NetutilStdinFn netutilStdinCallback;
+static void *netutilStdinUser;
+
+static void NetutilStdinAlloc (uv_handle_t *handle, size_t suggested,
+                               uv_buf_t *buffer) {
+    (void)handle;
+    if (suggested > 4096) suggested = 4096;
+    buffer->base = malloc (suggested);
+    buffer->len = buffer->base != NULL ? suggested : 0;
+}
+
+static void NetutilStdinRead (uv_stream_t *stream, ssize_t nread,
+                              const uv_buf_t *buffer) {
+    (void)stream;
+    if (nread > 0 && buffer->base != NULL && netutilStdinCallback != NULL)
+        netutilStdinCallback ((const unsigned char *)buffer->base,
+                              (size_t)nread, netutilStdinUser);
+    free (buffer->base);
+}
+
+bool NetutilStdinStart (NetutilStdinFn callback, void *user) {
+    if (!netutilInitialized || netutilStdinOpen) return false;
+    if (uv_pipe_init (&netutilLoop, &netutilStdin, 0) != 0) return false;
+    netutilStdinCallback = callback;
+    netutilStdinUser = user;
+    if (uv_pipe_open (&netutilStdin, 0) != 0 ||
+        uv_read_start ((uv_stream_t *)&netutilStdin, NetutilStdinAlloc,
+                       NetutilStdinRead) != 0) {
+        netutilStdinCallback = NULL;
+        netutilStdinUser = NULL;
+        return false;
+    }
+    netutilStdinOpen = true;
+    return true;
+}
+
+void NetutilStdinStop (void) {
+    if (!netutilStdinOpen) return;
+    netutilStdinOpen = false;
+    netutilStdinCallback = NULL;
+    netutilStdinUser = NULL;
+    uv_close ((uv_handle_t *)&netutilStdin, NULL);
 }
