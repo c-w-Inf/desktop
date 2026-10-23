@@ -14,10 +14,19 @@ if ! command -v bear >/dev/null 2>&1; then
     exit 1
 fi
 
-bear --append --output "$root/compile_commands.json" -- \
+bear_db="$build_dir/compile_commands.bear.json"
+cp "$build_dir/compile_commands.json" "$bear_db"
+bear --append --output "$bear_db" -- \
     cmake --build "$build_dir" "$@"
+cp "$bear_db" "$root/compile_commands.json"
 
-if [[ ! -s "$root/compile_commands.json" ]] || \
-   [[ "$(tr -d "[] \n" < "$root/compile_commands.json")" == "" ]]; then
-    cp "$build_dir/compile_commands.json" "$root/compile_commands.json"
+# The agent sandbox bind-mounts the repository at /home/c_w, while the real
+# checkout may live elsewhere. Keep CDB paths usable by the host clangd.
+host_root="$root"
+if [[ -r /proc/self/mountinfo ]]; then
+    mounted_root="$(awk -v target="$root" '$5 == target { value = $4 } END { print value }' /proc/self/mountinfo)"
+    if [[ -n "$mounted_root" && "$mounted_root" != "$root" ]]; then
+        host_root="$mounted_root"
+    fi
 fi
+python3 "$root/tools/compile_commands_for_host.py" "$root" "$host_root"
