@@ -12,14 +12,26 @@
 #include <sys/stat.h>
 
 #include <json-c/json.h>
+
+#include "assets.h"
+
 #include <uv.h>
 #include <zip.h>
 
-#include "assets.h"
 #include "entity.h"
 #include "hjson.h"
 #include "menu.h"
 #include "object.h"
+
+#ifndef S_ISLNK
+#define S_ISLNK(mode) (((mode) & S_IFMT) == S_IFLNK)
+#endif
+#ifndef S_ISDIR
+#define S_ISDIR(mode) (((mode) & S_IFMT) == S_IFDIR)
+#endif
+#ifndef S_ISREG
+#define S_ISREG(mode) (((mode) & S_IFMT) == S_IFREG)
+#endif
 
 #define DSK_ZIP_VERSION 1u
 #define DSK_ZIP_MAX_ENTRY ((uint64_t)512u * 1024u * 1024u)

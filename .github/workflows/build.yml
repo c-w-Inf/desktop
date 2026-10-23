@@ -14,8 +14,18 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y cmake ninja-build pkg-config \
-            libraylib-dev libjson-c-dev libuv1-dev libzip-dev
+          sudo apt-get install -y cmake ninja-build pkg-config git \
+            libjson-c-dev libuv1-dev libzip-dev \
+            libgl1-mesa-dev libx11-dev libxrandr-dev libxi-dev \
+            libxcursor-dev libxinerama-dev libwayland-dev libxkbcommon-dev
+      - name: Build raylib
+        run: |
+          git clone --depth 1 --branch 6.2 https://github.com/raysan5/raylib.git raylib-src
+          cmake -S raylib-src -B raylib-build -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release -DBUILD_EXAMPLES=OFF \
+            -DBUILD_SHARED_LIBS=ON
+          cmake --build raylib-build
+          sudo cmake --install raylib-build
       - name: Configure
         run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
       - name: Build

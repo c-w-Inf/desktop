@@ -15,10 +15,10 @@
 #include <string.h>
 #include <time.h>
 
-#include <uv.h>
-
 #include "raylib.h"
 #include "raymath.h"
+
+#include <uv.h>
 
 #include "assets.h"
 #include "entity.h"
