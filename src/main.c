@@ -255,6 +255,7 @@ int main (int argc, char **argv) {
     const char *loadPath = NULL;
     const char *savePath = NULL;
     const char *controlPath = NULL;
+    const char *bindAddress = NULL;
     int port = 0;
 
     for (int i = 1; i < argc; i++) {
@@ -271,6 +272,8 @@ int main (int argc, char **argv) {
             savePath = argv[++i];
         } else if (strcmp (argv[i], "--control-pipe") == 0 && i + 1 < argc) {
             controlPath = argv[++i];
+        } else if (strcmp (argv[i], "--bind") == 0 && i + 1 < argc) {
+            bindAddress = argv[++i];
         } else if (host == NULL) {
             host = argv[i];
         } else if (port == 0) {
@@ -298,7 +301,9 @@ int main (int argc, char **argv) {
         ControlClient control = {0};
         if (controlPath != NULL && controlPath[0] != '\0')
             ControlClientStart (&control, controlPath);
-        int result = NetRunServer (port, "0.0.0.0", loadPath, savePath);
+        int result = NetRunServer (port,
+                                   bindAddress != NULL ? bindAddress : "0.0.0.0",
+                                   loadPath, savePath);
         ControlClientStop (&control);
         UserUnload ();
         ObjectUnload ();
