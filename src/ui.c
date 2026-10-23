@@ -141,7 +141,9 @@ static void LayoutMenus (Ui *ui) {
             ui->menuX[i] = x;
             continue;
         }
-        ui->menuW[i] = MeasureTextEx (ui->font, menuNames[i], UI_FONT_SIZE, 0).x + 32.0f;
+        float measured = MeasureTextEx (ui->font, menuNames[i], UI_FONT_SIZE, 0).x;
+        if (measured < 8.0f) measured = 72.0f;
+        ui->menuW[i] = measured + 32.0f;
         ui->menuX[i] = x;
         x += ui->menuW[i];
     }
