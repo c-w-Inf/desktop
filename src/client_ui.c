@@ -759,7 +759,13 @@ bool ClientFrame (ClientFrameState *state) {
         DrawNetCursors (ui, view);
         UiDraw (ui);
 #if defined(__EMSCRIPTEN__)
-        DrawTexture (GetFontDefault ().texture, 400, 300, WHITE);
+        static Texture2D webDebugTexture = {0};
+        if (webDebugTexture.id == 0) {
+            Image webDebugImage = GenImageColor (64, 64, MAGENTA);
+            webDebugTexture = LoadTextureFromImage (webDebugImage);
+            UnloadImage (webDebugImage);
+        }
+        DrawTexture (webDebugTexture, 400, 400, WHITE);
         DrawRectangle (400, 450, 50, 50, BLUE);
 #endif
         EndDrawing ();
