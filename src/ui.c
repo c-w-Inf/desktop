@@ -187,7 +187,32 @@ static Font LoadAppFont (const char *name, int size) {
 
     int count = 0;
     int *codepoints = BuildFontCodepoints (&count);
+#if defined(__EMSCRIPTEN__)
+    int fileSize = 0;
+    unsigned char *fileData = ReadFileBytes (path, &fileSize);
+    Font font = {0};
+    if (fileData != NULL && fileSize > 0) {
+        font.baseSize = size;
+        font.glyphPadding = 4;
+        font.glyphs = LoadFontData (fileData, fileSize, size, codepoints,
+                                    count, FONT_DEFAULT, &font.glyphCount);
+        free (fileData);
+        if (font.glyphs != NULL) {
+            Image atlas = GenImageFontAtlas (font.glyphs, &font.recs,
+                                             font.glyphCount, size,
+                                             font.glyphPadding, 0);
+            ImageFormat (&atlas, PIXELFORMAT_UNCOMPRESSED_R8G8B8A8);
+            font.texture = LoadTextureFromImage (atlas);
+            for (int i = 0; i < font.glyphCount; i++) {
+                UnloadImage (font.glyphs[i].image);
+                font.glyphs[i].image = ImageFromImage (atlas, font.recs[i]);
+            }
+            UnloadImage (atlas);
+        }
+    }
+#else
     Font font = LoadFontEx (path, size, codepoints, count);
+#endif
     free (codepoints);
     return font;
 }
