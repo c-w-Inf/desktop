@@ -113,7 +113,7 @@ static void WebLoadFont (void) {
     webFontFailed = false;
     printf ("WEBFONT start\n");
     fflush (stdout);
-    emscripten_async_wget ("/assets/WenQuanYiMicroHei.ttf",
+    emscripten_async_wget ("/assets/unifont.otf",
                            "/assets/WenQuanYiMicroHei.ttf",
                            WebFontOnLoad, WebFontOnError);
     while (!webFontLoaded) emscripten_sleep (10);
