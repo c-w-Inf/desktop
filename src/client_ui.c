@@ -767,6 +767,7 @@ bool ClientFrame (ClientFrameState *state) {
         }
         DrawTexture (webDebugTexture, 400, 400, WHITE);
         DrawRectangle (400, 450, 50, 50, BLUE);
+        DrawRectangle (390, 290, 140, 140, BLACK);
         DrawTextureRec (ui->font.texture, (Rectangle){0, 0, 128, 128},
                         (Vector2){400, 300}, WHITE);
         DrawTextEx (ui->font, "ABC", (Vector2){540, 300}, 32, 0, RED);
