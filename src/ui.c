@@ -202,9 +202,15 @@ static void LoadFonts (Ui *ui) {
 #else
     int atlasSize = UI_FONT_SIZE;
 #endif
-    Font sans = LoadAppFont ("WenQuanYiMicroHei.ttf", atlasSize);
+#if defined(__EMSCRIPTEN__)
+    Font sans = LoadAppFont ("unifont.otf", atlasSize);
+    if (!IsLoadedFont (sans))
+        sans = LoadAppFont ("WenQuanYiMicroHei.ttf", atlasSize);
+#else
+    Font sans = LoadAppFont ("WenQuanYiMicroHei.ttf", UI_FONT_SIZE);
     if (!IsLoadedFont (sans))
         sans = LoadAppFont ("unifont.otf", UI_FONT_SIZE);
+#endif
 
     if (IsLoadedFont (sans)) {
         if (ui->customFont && ui->font.texture.id != sans.texture.id) UnloadFont (ui->font);
