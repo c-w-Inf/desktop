@@ -186,7 +186,7 @@ static void DrawBackground (const View *view) {
 }
 
 static void DrawObjectShadow (const View *view, const Object *object) {
-    if (view->shadowShader.id == 0) return;
+    if (view->shadowShader.id == 0 || object->assets.count == 0) return;
 
     static const Vector2 offsets[] = {
         { 3.0f,  0.0f}, {-3.0f,  0.0f}, { 0.0f,  3.0f}, { 0.0f, -3.0f},
