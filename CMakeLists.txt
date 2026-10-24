@@ -208,6 +208,9 @@ else()
     target_link_options(image_canvas PRIVATE
         --preload-file "${CMAKE_CURRENT_SOURCE_DIR}/assets@assets"
         -sUSE_GLFW=3
+        -sMIN_WEBGL_VERSION=2
+        -sMAX_WEBGL_VERSION=2
+        -sFULL_ES3=1
         -lwebsocket.js
         -sASYNCIFY
         -sALLOW_MEMORY_GROWTH
