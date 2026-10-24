@@ -110,6 +110,17 @@ int main (void) {
     SetConfigFlags (FLAG_WINDOW_RESIZABLE | FLAG_VSYNC_HINT);
     InitWindow (1000, 700, "Image Canvas");
     if (!IsWindowReady ()) return 1;
+    EM_ASM({
+        const canvas = document.getElementById("canvas");
+        if (canvas) {
+            canvas.style.width = "1000px";
+            canvas.style.height = "700px";
+            canvas.style.imageRendering = "pixelated";
+        }
+        document.body.style.margin = "0";
+        document.body.style.background = "#ffffff";
+        document.body.style.overflow = "hidden";
+    });
 
     AssetInit ();
     ObjectInit ();
