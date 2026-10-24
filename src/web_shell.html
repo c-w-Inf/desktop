@@ -1,0 +1,34 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Image Canvas</title>
+  <style>
+    html, body {
+      margin: 0;
+      padding: 0;
+      width: 100%;
+      height: 100%;
+      overflow: hidden;
+      background: #ffffff;
+    }
+    canvas.emscripten {
+      display: block;
+      width: 1000px;
+      height: 700px;
+      border: 0;
+      outline: none;
+      margin: 0;
+      padding: 0;
+      background: #ffffff;
+    }
+  </style>
+</head>
+<body>
+  <canvas class="emscripten" id="canvas"
+          oncontextmenu="event.preventDefault()"
+          tabindex="-1"></canvas>
+  {{{ SCRIPT }}}
+</body>
+</html>
