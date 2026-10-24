@@ -131,6 +131,7 @@ typedef struct Ui {
 } Ui;
 
 void UiInit (Ui *ui);
+void UiReloadFonts (Ui *ui);
 void UiUnload (Ui *ui);
 void UiShowMessage (Ui *ui, const char *message);
 void UiShowError (Ui *ui, const char *message);

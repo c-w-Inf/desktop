@@ -91,6 +91,8 @@ static bool WebOpenRemote (const char *program, const char *host, int port,
 
 static bool webFontLoaded;
 static bool webFontFailed;
+static bool webFontApplied;
+static Ui *webUi;
 
 static void WebFontOnLoad (const char *file) {
     printf ("WEBFONT loaded: %s\n", file);
@@ -116,8 +118,6 @@ static void WebLoadFont (void) {
     emscripten_async_wget ("/assets/WenQuanYiMicroHei.ttf",
                            "/assets/WenQuanYiMicroHei.ttf",
                            WebFontOnLoad, WebFontOnError);
-    while (!webFontLoaded) emscripten_sleep (10);
-    if (webFontFailed) fprintf (stderr, "Web font fetch failed\n");
 }
 
 static void WebErrorFrame (void) {
@@ -129,7 +129,15 @@ static void WebErrorFrame (void) {
     EndDrawing ();
 }
 
+static void WebApplyFont (void) {
+    if (webFontLoaded && !webFontApplied && webUi != NULL) {
+        webFontApplied = true;
+        if (!webFontFailed) UiReloadFonts (webUi);
+    }
+}
+
 static void WebClientFrame (void) {
+    WebApplyFont ();
     if (!ClientFrame (&webFrame)) {
         NetClientDisconnect ();
         ClientFrameUnload (&webFrame);
@@ -157,10 +165,10 @@ int main (void) {
     ObjectInit ();
     UserInit ();
 
-    WebLoadFont ();
-
     Ui ui;
     UiInit (&ui);
+    webUi = &ui;
+    WebLoadFont ();
     View view;
     ViewInit (&view);
 

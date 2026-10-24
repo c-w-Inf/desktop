@@ -314,6 +314,10 @@ void UiInit (Ui *ui) {
     LoadFonts (ui);
 }
 
+void UiReloadFonts (Ui *ui) {
+    LoadFonts (ui);
+}
+
 void UiUnload (Ui *ui) {
     if (ui->customMonoFont && ui->monoFont.texture.id != ui->font.texture.id)
         UnloadFont (ui->monoFont);
