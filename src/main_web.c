@@ -81,33 +81,33 @@ static bool WebOpenRemote (const char *program, const char *host, int port,
     char endpoint[512];
     snprintf (endpoint, sizeof (endpoint), "ws://%s:%d", host, port);
     EM_ASM({
-        var canvas = document.getElementById("canvas");
-        if (canvas) {
-            canvas.style.position = "fixed";
-            canvas.style.left = "0";
-            canvas.style.top = "0";
-            canvas.style.margin = "0";
-            canvas.style.width = canvas.width + "px";
-            canvas.style.height = canvas.height + "px";
-            canvas.style.zIndex = "10";
-        }
-        document.body.style.margin = "0";
-        document.body.style.background = "#ffffff";
-        document.body.style.overflow = "hidden";
-        var element = document.getElementById("status");
-        if (element) element.style.display = "none";
-        element = document.getElementById("spinner");
-        if (element) element.style.display = "none";
-        element = document.getElementById("progress");
-        if (element) element.style.display = "none";
-        element = document.getElementById("controls");
-        if (element) element.style.display = "none";
-        element = document.getElementById("output");
-        if (element) element.style.display = "none";
-        var links = document.querySelectorAll("a[href*=emscripten]");
-        for (var index = 0; index < links.length; index++) {
-            links[index].style.display = "none";
-        }
+        const endpoint = UTF8ToString($0);
+        const name = UTF8ToString($1);
+        window.open("?server=" + encodeURIComponent(endpoint) +
+                    "&name=" + encodeURIComponent(name), "_blank");
+    }, endpoint, username);
+    return true;
+}
+
+static bool webFontLoaded;
+static bool webFontFailed;
+
+static void WebFontOnLoad (const char *file) {
+    printf ("WEBFONT loaded: %s\n", file);
+    fflush (stdout);
+    webFontLoaded = true;
+}
+
+static void WebFontOnError (const char *file) {
+    printf ("WEBFONT failed: %s\n", file);
+    fflush (stdout);
+    webFontLoaded = true;
+    webFontFailed = true;
+}
+
+static void WebLoadFont (void) {
+    EM_ASM({
+        try { FS.mkdir("/assets"); } catch (error) {}
     });
     webFontLoaded = false;
     webFontFailed = false;
@@ -155,13 +155,20 @@ int main (void) {
         document.body.style.margin = "0";
         document.body.style.background = "#ffffff";
         document.body.style.overflow = "hidden";
-        ["status", "spinner", "progress", "controls", "output"].forEach((id) => {
-            const element = document.getElementById(id);
-            if (element) element.style.display = "none";
-        });
-        document.querySelectorAll('a[href*="emscripten.org"]').forEach((element) => {
-            element.style.display = "none";
-        });
+    });
+    EM_ASM({
+        var element = document.getElementById("status");
+        if (element) element.style.display = "none";
+        element = document.getElementById("spinner");
+        if (element) element.style.display = "none";
+        element = document.getElementById("progress");
+        if (element) element.style.display = "none";
+        element = document.getElementById("controls");
+        if (element) element.style.display = "none";
+        element = document.getElementById("output");
+        if (element) element.style.display = "none";
+        var links = document.querySelectorAll("a[href*=emscripten]");
+        for (var index = 0; index < links.length; index++) links[index].style.display = "none";
     });
 
     AssetInit ();
