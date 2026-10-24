@@ -197,7 +197,12 @@ static bool IsLoadedFont (Font font) {
 }
 
 static void LoadFonts (Ui *ui) {
-    Font sans = LoadAppFont ("WenQuanYiMicroHei.ttf", UI_FONT_SIZE);
+#if defined(__EMSCRIPTEN__)
+    int atlasSize = 12;
+#else
+    int atlasSize = UI_FONT_SIZE;
+#endif
+    Font sans = LoadAppFont ("WenQuanYiMicroHei.ttf", atlasSize);
     if (!IsLoadedFont (sans))
         sans = LoadAppFont ("unifont.otf", UI_FONT_SIZE);
 
@@ -209,7 +214,7 @@ static void LoadFonts (Ui *ui) {
         ui->font = GetFontDefault ();
     }
 
-    Font mono = LoadAppFont ("WenQuanYiMicroHeiMono.ttf", UI_CODE_FONT_SIZE);
+    Font mono = LoadAppFont ("WenQuanYiMicroHeiMono.ttf", atlasSize);
     if (IsLoadedFont (mono)) {
         if (ui->customMonoFont && ui->monoFont.texture.id != mono.texture.id)
             UnloadFont (ui->monoFont);
