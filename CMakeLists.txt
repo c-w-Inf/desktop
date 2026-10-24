@@ -206,7 +206,6 @@ else()
                 "$<TARGET_FILE:image_canvas>"
                 "${CMAKE_BINARY_DIR}/web/index.html")
     target_link_options(image_canvas PRIVATE
-        --preload-file "${CMAKE_CURRENT_SOURCE_DIR}/assets@assets"
         -sUSE_GLFW=3
         -lwebsocket.js
         -sASYNCIFY
