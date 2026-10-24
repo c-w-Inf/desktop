@@ -1928,20 +1928,6 @@ static float MenuTextY (Font font, const char *text, Rectangle item) {
 static void DrawMenuBar (const Ui *ui) {
     LayoutMenus ((Ui *)ui);
     Vector2 mouse = GetMousePosition ();
-#if defined(__EMSCRIPTEN__)
-    static bool fontProbe = false;
-    if (!fontProbe) {
-        fontProbe = true;
-        Vector2 metrics = MeasureTextEx (ui->font, "\xE7\xB4\xA0\xE6\x9D\x90",
-                                         UI_FONT_SIZE, 0);
-        printf ("FONTDEBUG base=%d glyphs=%d tex=%dx%d screen=%dx%d menuW1=%.1f text=%.1fx%.1f\n",
-                ui->font.baseSize, ui->font.glyphCount,
-                ui->font.texture.width, ui->font.texture.height,
-                GetScreenWidth (), GetScreenHeight (), ui->menuW[1],
-                metrics.x, metrics.y);
-        fflush (stdout);
-    }
-#endif
     DrawRectangle (0, 0, GetScreenWidth (), UI_BAR_HEIGHT, (Color){16, 18, 23, 255});
     DrawRectangle (0, UI_BAR_HEIGHT - 1, GetScreenWidth (), 1, (Color){55, 60, 72, 255});
 
