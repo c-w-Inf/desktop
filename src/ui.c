@@ -1842,6 +1842,11 @@ UiEvent UiUpdate (Ui *ui) {
     }
 
     if (IsMouseButtonPressed (MOUSE_BUTTON_LEFT)) {
+#if defined(__EMSCRIPTEN__)
+        printf ("MOUSEDEBUG mouse=%.1f,%.1f screen=%dx%d\n",
+                mouse.x, mouse.y, GetScreenWidth (), GetScreenHeight ());
+        fflush (stdout);
+#endif
         if (mouse.y <= UI_BAR_HEIGHT) {
             int hit = -1;
             for (int i = 0; i < UI_MENU_COUNT; i++) {
@@ -1855,6 +1860,12 @@ UiEvent UiUpdate (Ui *ui) {
                 }
             }
 
+#if defined(__EMSCRIPTEN__)
+            printf ("MENUHIT hit=%d mouse=%.1f x0=%.1f w0=%.1f x1=%.1f w1=%.1f x2=%.1f w2=%.1f\n",
+                    hit, mouse.x, ui->menuX[0], ui->menuW[0],
+                    ui->menuX[1], ui->menuW[1], ui->menuX[2], ui->menuW[2]);
+            fflush (stdout);
+#endif
             if (hit >= 0) event.deselectObject = true;
 
             if (hit == 0) {
