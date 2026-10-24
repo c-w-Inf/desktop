@@ -66,6 +66,7 @@ EM_JS(void, CutilsPickImportFile, (void), {
         reader.onload = () => {
             const path = "/tmp/import-" + Date.now() + "-" + file.name;
             try {
+                try { FS.mkdir("/tmp"); } catch (error) {}
                 FS.writeFile(path, new Uint8Array(reader.result));
                 ccall("CutilsWebFileSelected", null, ["string"], [path]);
             } catch (error) {
