@@ -207,6 +207,7 @@ else()
                 "${CMAKE_BINARY_DIR}/web/index.html")
     target_link_options(image_canvas PRIVATE
         -sUSE_GLFW=3
+        --pre-js "${CMAKE_CURRENT_SOURCE_DIR}/src/web_font_cache.js"
         -lwebsocket.js
         -sASYNCIFY
         -sALLOW_MEMORY_GROWTH

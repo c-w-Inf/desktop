@@ -93,31 +93,18 @@ static bool WebOpenRemote (const char *program, const char *host, int port,
 static bool webFontLoaded;
 static bool webFontFailed;
 
-static void WebFontOnLoad (const char *file) {
-    printf ("WEBFONT loaded: %s\n", file);
-    fflush (stdout);
+EMSCRIPTEN_KEEPALIVE
+void WebFontReady (int ok) {
     webFontLoaded = true;
-}
-
-static void WebFontOnError (const char *file) {
-    printf ("WEBFONT failed: %s\n", file);
-    fflush (stdout);
-    webFontLoaded = true;
-    webFontFailed = true;
+    webFontFailed = !ok;
 }
 
 static void WebLoadFont (void) {
-    EM_ASM({
-        try { FS.mkdir("/assets"); } catch (error) {}
-    });
     webFontLoaded = false;
     webFontFailed = false;
-    printf ("WEBFONT start\n");
-    fflush (stdout);
-    emscripten_async_wget ("/assets/WenQuanYiMicroHei.ttf",
-                           "/assets/WenQuanYiMicroHei.ttf",
-                           WebFontOnLoad, WebFontOnError);
+    emscripten_run_script ("imageCanvasFetchFont()");
     while (!webFontLoaded) emscripten_sleep (10);
+    if (webFontFailed) fprintf (stderr, "Web font fetch failed\n");
 }
 
 static void WebErrorFrame (void) {
