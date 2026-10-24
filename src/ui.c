@@ -1926,6 +1926,7 @@ static float MenuTextY (Font font, const char *text, Rectangle item) {
 }
 
 static void DrawMenuBar (const Ui *ui) {
+    LayoutMenus ((Ui *)ui);
     Vector2 mouse = GetMousePosition ();
 #if defined(__EMSCRIPTEN__)
     static bool fontProbe = false;
