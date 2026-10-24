@@ -144,8 +144,13 @@ int main (void) {
     EM_ASM({
         const canvas = document.getElementById("canvas");
         if (canvas) {
+            canvas.style.position = "fixed";
+            canvas.style.left = "0";
+            canvas.style.top = "0";
+            canvas.style.margin = "0";
             canvas.style.width = canvas.width + "px";
             canvas.style.height = canvas.height + "px";
+            canvas.style.zIndex = "10";
         }
         document.body.style.margin = "0";
         document.body.style.background = "#ffffff";
