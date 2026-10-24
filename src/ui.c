@@ -1735,6 +1735,7 @@ static void UpdateScript (Ui *ui, UiEvent *event) {
 
 UiEvent UiUpdate (Ui *ui) {
     UiEvent event = {0};
+    LayoutMenus (ui);
     Vector2 mouse = GetMousePosition ();
 #if defined(__EMSCRIPTEN__)
     if (IsMouseButtonPressed (MOUSE_BUTTON_LEFT)) {
