@@ -1736,6 +1736,12 @@ static void UpdateScript (Ui *ui, UiEvent *event) {
 UiEvent UiUpdate (Ui *ui) {
     UiEvent event = {0};
     Vector2 mouse = GetMousePosition ();
+#if defined(__EMSCRIPTEN__)
+    if (IsMouseButtonPressed (MOUSE_BUTTON_LEFT)) {
+        printf ("UPDATECLICK mouse=%.1f,%.1f\n", mouse.x, mouse.y);
+        fflush (stdout);
+    }
+#endif
     float wheel = GetMouseWheelMove ();
 
     if (!IsMouseButtonDown (MOUSE_BUTTON_LEFT)) ui->uiPress = false;
