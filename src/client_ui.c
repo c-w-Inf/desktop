@@ -758,20 +758,6 @@ bool ClientFrame (ClientFrameState *state) {
         ViewDraw (view, chosen, ui->font);
         DrawNetCursors (ui, view);
         UiDraw (ui);
-#if defined(__EMSCRIPTEN__)
-        static Texture2D webDebugTexture = {0};
-        if (webDebugTexture.id == 0) {
-            Image webDebugImage = GenImageColor (64, 64, MAGENTA);
-            webDebugTexture = LoadTextureFromImage (webDebugImage);
-            UnloadImage (webDebugImage);
-        }
-        DrawTexture (webDebugTexture, 400, 400, WHITE);
-        DrawRectangle (400, 450, 50, 50, BLUE);
-        DrawRectangle (390, 290, 140, 140, BLACK);
-        DrawTextureRec (ui->font.texture, (Rectangle){0, 0, 128, 128},
-                        (Vector2){400, 300}, WHITE);
-        DrawTextEx (ui->font, "ABC", (Vector2){540, 300}, 32, 0, RED);
-#endif
         EndDrawing ();
 #undef chosen
 #undef dragged

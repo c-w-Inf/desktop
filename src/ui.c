@@ -150,18 +150,6 @@ static void LayoutMenus (Ui *ui) {
 }
 
 static int *BuildFontCodepoints (int *count) {
-#if defined(__EMSCRIPTEN__)
-    static const int webCodepoints[] = {
-        0x0020, 0x0030, 0x0031, 0x0032, 0x0039,
-        0x6587, 0x4EF6, 0x7D20, 0x6750, 0x7269,
-        0x811A, 0x672C, 0x8054, 0x673A, 0x5BFC,
-        0x5165, 0x76EE, 0x5F55, 0x5BFC, 0x51FA
-    };
-    *count = (int)(sizeof (webCodepoints) / sizeof (webCodepoints[0]));
-    int *small = malloc ((size_t)*count * sizeof (int));
-    if (small != NULL) memcpy (small, webCodepoints, sizeof (webCodepoints));
-    return small;
-#else
     static const int ranges[][2] = {
         {0x0020, 0x007E},
         {0x00A0, 0x024F},
@@ -187,7 +175,6 @@ static int *BuildFontCodepoints (int *count) {
     }
     *count = total;
     return codepoints;
-#endif
 }
 
 static Font LoadAppFont (const char *name, int size) {
@@ -200,32 +187,7 @@ static Font LoadAppFont (const char *name, int size) {
 
     int count = 0;
     int *codepoints = BuildFontCodepoints (&count);
-#if defined(__EMSCRIPTEN__)
-    int fileSize = 0;
-    unsigned char *fileData = ReadFileBytes (path, &fileSize);
-    Font font = {0};
-    if (fileData != NULL && fileSize > 0) {
-        font.baseSize = size;
-        font.glyphPadding = 4;
-        font.glyphs = LoadFontData (fileData, fileSize, size, codepoints,
-                                    count, FONT_DEFAULT, &font.glyphCount);
-        free (fileData);
-        if (font.glyphs != NULL) {
-            Image atlas = GenImageFontAtlas (font.glyphs, &font.recs,
-                                             font.glyphCount, size,
-                                             font.glyphPadding, 0);
-            ImageFormat (&atlas, PIXELFORMAT_UNCOMPRESSED_R8G8B8A8);
-            font.texture = LoadTextureFromImage (atlas);
-            for (int i = 0; i < font.glyphCount; i++) {
-                UnloadImage (font.glyphs[i].image);
-                font.glyphs[i].image = ImageFromImage (atlas, font.recs[i]);
-            }
-            UnloadImage (atlas);
-        }
-    }
-#else
     Font font = LoadFontEx (path, size, codepoints, count);
-#endif
     free (codepoints);
     return font;
 }
