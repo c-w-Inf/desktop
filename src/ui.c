@@ -149,6 +149,7 @@ static void LayoutMenus (Ui *ui) {
     }
 }
 
+static int *BuildFontCodepoints (int *count) {
 #if defined(__EMSCRIPTEN__)
     static const int webCodepoints[] = {
         0x0020, 0x0030, 0x0031, 0x0032, 0x0039,
