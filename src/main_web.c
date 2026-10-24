@@ -93,12 +93,14 @@ static bool webFontLoaded;
 static bool webFontFailed;
 
 static void WebFontOnLoad (const char *file) {
-    (void)file;
+    printf ("WEBFONT loaded: %s\n", file);
+    fflush (stdout);
     webFontLoaded = true;
 }
 
 static void WebFontOnError (const char *file) {
-    (void)file;
+    printf ("WEBFONT failed: %s\n", file);
+    fflush (stdout);
     webFontLoaded = true;
     webFontFailed = true;
 }
@@ -109,7 +111,9 @@ static void WebLoadFont (void) {
     });
     webFontLoaded = false;
     webFontFailed = false;
-    emscripten_async_wget ("assets/WenQuanYiMicroHei.ttf",
+    printf ("WEBFONT start\n");
+    fflush (stdout);
+    emscripten_async_wget ("/assets/WenQuanYiMicroHei.ttf",
                            "/assets/WenQuanYiMicroHei.ttf",
                            WebFontOnLoad, WebFontOnError);
     while (!webFontLoaded) emscripten_sleep (10);
