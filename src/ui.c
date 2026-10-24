@@ -198,7 +198,7 @@ static bool IsLoadedFont (Font font) {
 
 static void LoadFonts (Ui *ui) {
 #if defined(__EMSCRIPTEN__)
-    int atlasSize = 12;
+    int atlasSize = 8;
 #else
     int atlasSize = UI_FONT_SIZE;
 #endif
