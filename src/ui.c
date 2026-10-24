@@ -1931,6 +1931,9 @@ static float MenuTextY (Font font, const char *text, Rectangle item) {
 
 static void DrawMenuBar (const Ui *ui) {
     Vector2 mouse = GetMousePosition ();
+#if defined(__EMSCRIPTEN__)
+    DrawText ("TEST", 300, 8, 20, RED);
+#endif
     DrawRectangle (0, 0, GetScreenWidth (), UI_BAR_HEIGHT, (Color){16, 18, 23, 255});
     DrawRectangle (0, UI_BAR_HEIGHT - 1, GetScreenWidth (), 1, (Color){55, 60, 72, 255});
 
