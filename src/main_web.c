@@ -110,6 +110,7 @@ int main (void) {
     SetConfigFlags (FLAG_WINDOW_RESIZABLE | FLAG_VSYNC_HINT);
     InitWindow (1000, 700, "Image Canvas");
     if (!IsWindowReady ()) return 1;
+    SetWindowSize (1000, 700);
     EM_ASM({
         const canvas = document.getElementById("canvas");
         if (canvas) {
