@@ -28,6 +28,15 @@ endif()
 if(NOT TARGET raylib)
     pkg_check_modules(RAYLIB REQUIRED IMPORTED_TARGET raylib)
 endif()
+if(TARGET raylib)
+    get_target_property(_raylib_imported raylib IMPORTED)
+    if(NOT _raylib_imported)
+        target_compile_definitions(raylib PUBLIC
+            SUPPORT_FILEFORMAT_JPG=1
+            SUPPORT_FILEFORMAT_TGA=1
+            SUPPORT_FILEFORMAT_PSD=1)
+    endif()
+endif()
 
 if(NOT EMSCRIPTEN)
     find_package(libzip CONFIG QUIET)
