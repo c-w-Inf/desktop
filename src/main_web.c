@@ -169,6 +169,10 @@ int main (void) {
         if (element) element.style.display = "none";
         var links = document.querySelectorAll("a[href*=emscripten]");
         for (var index = 0; index < links.length; index++) links[index].style.display = "none";
+        var pointer = document.getElementById("pointerLock");
+        if (pointer) pointer.checked = false;
+        document.exitPointerLock();
+        if (canvas.requestPointerLock) canvas.requestPointerLock = function() {};
     });
 
     AssetInit ();
