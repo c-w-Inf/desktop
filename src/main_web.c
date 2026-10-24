@@ -114,9 +114,8 @@ int main (void) {
     EM_ASM({
         const canvas = document.getElementById("canvas");
         if (canvas) {
-            canvas.style.width = "1000px";
-            canvas.style.height = "700px";
-            canvas.style.imageRendering = "pixelated";
+            canvas.style.width = canvas.width + "px";
+            canvas.style.height = canvas.height + "px";
         }
         document.body.style.margin = "0";
         document.body.style.background = "#ffffff";
