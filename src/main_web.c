@@ -155,6 +155,13 @@ int main (void) {
         document.body.style.margin = "0";
         document.body.style.background = "#ffffff";
         document.body.style.overflow = "hidden";
+        ["status", "spinner", "progress", "controls", "output"].forEach((id) => {
+            const element = document.getElementById(id);
+            if (element) element.style.display = "none";
+        });
+        document.querySelectorAll('a[href*="emscripten.org"]').forEach((element) => {
+            element.style.display = "none";
+        });
     });
 
     AssetInit ();
