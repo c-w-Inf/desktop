@@ -6,6 +6,7 @@
 #include <string.h>
 
 #include <emscripten.h>
+#include <emscripten/html5.h>
 
 #include "raylib.h"
 #include "raymath.h"
@@ -136,26 +137,39 @@ static void WebClientFrame (void) {
     }
 }
 
+static void WebSyncCanvas (void) {
+    EM_ASM({
+        var canvas = document.getElementById("canvas");
+        if (!canvas) return;
+        canvas.style.position = "fixed";
+        canvas.style.left = "0";
+        canvas.style.top = "0";
+        canvas.style.margin = "0";
+        canvas.style.width = canvas.width + "px";
+        canvas.style.height = canvas.height + "px";
+        canvas.style.zIndex = "10";
+    });
+}
+
+static EM_BOOL WebOnResize (int eventType, const EmscriptenUiEvent *event,
+                            void *user) {
+    (void)eventType;
+    (void)user;
+    SetWindowSize (event->windowInnerWidth, event->windowInnerHeight);
+    WebSyncCanvas ();
+    return EM_TRUE;
+}
+
 int main (void) {
     SetConfigFlags (FLAG_WINDOW_RESIZABLE | FLAG_VSYNC_HINT);
     InitWindow (1000, 700, "Image Canvas");
     if (!IsWindowReady ()) return 1;
-    SetWindowSize (1000, 700);
-    EM_ASM({
-        const canvas = document.getElementById("canvas");
-        if (canvas) {
-            canvas.style.position = "fixed";
-            canvas.style.left = "0";
-            canvas.style.top = "0";
-            canvas.style.margin = "0";
-            canvas.style.width = canvas.width + "px";
-            canvas.style.height = canvas.height + "px";
-            canvas.style.zIndex = "10";
-        }
-        document.body.style.margin = "0";
-        document.body.style.background = "#ffffff";
-        document.body.style.overflow = "hidden";
-    });
+    int initialWidth = EM_ASM_INT({ return window.innerWidth; });
+    int initialHeight = EM_ASM_INT({ return window.innerHeight; });
+    SetWindowSize (initialWidth, initialHeight);
+    WebSyncCanvas ();
+    emscripten_set_resize_callback (EMSCRIPTEN_EVENT_TARGET_WINDOW, NULL, 0,
+                                    WebOnResize);
     EM_ASM({
         var element = document.getElementById("status");
         if (element) element.style.display = "none";
@@ -172,7 +186,6 @@ int main (void) {
         var pointer = document.getElementById("pointerLock");
         if (pointer) pointer.checked = false;
         document.exitPointerLock();
-        if (canvas.requestPointerLock) canvas.requestPointerLock = function() {};
     });
 
     AssetInit ();
