@@ -88,7 +88,9 @@ CutilsDialogResult CutilsOpenImage (char *path, size_t size) {
 #if defined(__EMSCRIPTEN__)
     (void)path;
     (void)size;
-    return CUTILS_DIALOG_FAILED;
+    if (fileHandler == NULL) return CUTILS_DIALOG_FAILED;
+    CutilsPickImportFile ();
+    return CUTILS_DIALOG_PENDING;
 #else
     PrepareDialogs ();
     const char *selected = tinyfd_openFileDialog (
