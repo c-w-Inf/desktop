@@ -149,7 +149,18 @@ static void LayoutMenus (Ui *ui) {
     }
 }
 
-static int *BuildFontCodepoints (int *count) {
+#if defined(__EMSCRIPTEN__)
+    static const int webCodepoints[] = {
+        0x0020, 0x0030, 0x0031, 0x0032, 0x0039,
+        0x6587, 0x4EF6, 0x7D20, 0x6750, 0x7269,
+        0x811A, 0x672C, 0x8054, 0x673A, 0x5BFC,
+        0x5165, 0x76EE, 0x5F55, 0x5BFC, 0x51FA
+    };
+    *count = (int)(sizeof (webCodepoints) / sizeof (webCodepoints[0]));
+    int *small = malloc ((size_t)*count * sizeof (int));
+    if (small != NULL) memcpy (small, webCodepoints, sizeof (webCodepoints));
+    return small;
+#else
     static const int ranges[][2] = {
         {0x0020, 0x007E},
         {0x00A0, 0x024F},
@@ -175,6 +186,7 @@ static int *BuildFontCodepoints (int *count) {
     }
     *count = total;
     return codepoints;
+#endif
 }
 
 static Font LoadAppFont (const char *name, int size) {
