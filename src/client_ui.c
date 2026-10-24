@@ -758,6 +758,10 @@ bool ClientFrame (ClientFrameState *state) {
         ViewDraw (view, chosen, ui->font);
         DrawNetCursors (ui, view);
         UiDraw (ui);
+#if defined(__EMSCRIPTEN__)
+        DrawTexture (GetFontDefault ().texture, 400, 300, WHITE);
+        DrawRectangle (400, 450, 50, 50, BLUE);
+#endif
         EndDrawing ();
 #undef chosen
 #undef dragged
