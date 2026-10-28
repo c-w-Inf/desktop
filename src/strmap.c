@@ -64,7 +64,7 @@ static bool EnsureCapacity (StrMap *map) {
     return Rehash (map, map->capacity * 2);
 }
 
-/* Return false if the table has no capacity. found reports an exact match. */
+
 static bool FindSlot (const StrMap *map, const char *key, size_t *slot, bool *found) {
     *found = false;
     if (map->capacity == 0) return false;
@@ -142,27 +142,6 @@ bool StrMapAdd (StrMap *map, const char *key, void *value) {
     bool found = false;
     if (!FindSlot (map, key, &slot, &found)) return false;
     if (found) return false;
-
-    char *copy = CopyKey (key);
-    if (copy == NULL) return false;
-    if (map->entries[slot].key == MAP_TOMBSTONE) map->tombstones--;
-    map->entries[slot].key = copy;
-    map->entries[slot].value = value;
-    map->count++;
-    map->orderDirty = true;
-    return true;
-}
-
-bool StrMapSet (StrMap *map, const char *key, void *value) {
-    if (!EnsureCapacity (map)) return false;
-
-    size_t slot = 0;
-    bool found = false;
-    if (!FindSlot (map, key, &slot, &found)) return false;
-    if (found) {
-        map->entries[slot].value = value;
-        return true;
-    }
 
     char *copy = CopyKey (key);
     if (copy == NULL) return false;

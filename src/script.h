@@ -6,34 +6,78 @@
 #include <stdio.h>
 #include "utils.h"
 
+/**
+ * @brief 不透明的脚本环境。
+ */
 typedef struct Env ScriptEnv;
 
-// 创建全局环境。self 0 直接使用它，其他 self 环境以它为父环境。
+/**
+ * @brief 创建全局脚本环境。
+ * @return 新环境，失败时为 NULL；其他 self 环境以它为父环境。
+ */
 ScriptEnv *ScriptEnvCreate (void);
+/**
+ * @brief 销毁脚本环境及其本地变量。
+ * @param env 要销毁的环境。
+ */
 void ScriptEnvDestroy (ScriptEnv *env);
 
-// 将 id 对应环境写入 file。id == 0 使用 globalEnv；没有环境时不写入且 written=false。
-// 写入内容为 u8 ownerKind + u32 小端长度前缀的 ownerName + u32 小端长度前缀的环境 JSON。
-// 返回 false 表示序列化或写入失败。
-bool ScriptEnvWrite (FILE *file, ScriptEnv *globalEnv, u64 id, uint8_t ownerKind,
-                     const char *ownerName, bool *written);
 
-// 用 JSON 对象文本替换 id 对应环境（id == 0 为 globalEnv）的本地变量。
+/**
+ * @brief 用 JSON 对象替换指定环境的本地变量。
+ * @param globalEnv 全局环境。
+ * @param id 实体 ID，0 表示全局环境。
+ * @param json JSON 对象文本。
+ * @return 解析和替换成功时为 true。
+ */
 bool ScriptEnvLoadJson (ScriptEnv *globalEnv, u64 id, const char *json);
 
-// 将 JSON 对象中的变量合并进 env 的本地变量；已存在的名称不替换，并把名称逐行写入 conflicts。
+/**
+ * @brief 将 JSON 对象中尚不存在的变量合并进环境。
+ * @param env 目标环境。
+ * @param json JSON 对象文本。
+ * @param conflicts 输出重名变量名，每行一个，可为 NULL。
+ * @return 合并成功时为 true。
+ */
 bool ScriptEnvMergeJson (ScriptEnv *env, const char *json, TextBuffer *conflicts);
 
-// 将 id 对应环境的本地变量序列化为 JSON 对象文本；没有环境或序列化失败时返回 NULL。
+/**
+ * @brief 将环境本地变量序列化为 JSON 对象文本。
+ * @param globalEnv 全局环境。
+ * @param id 实体 ID，0 表示全局环境。
+ * @return JSON 文本，调用方负责 free；环境不存在或失败时为 NULL。
+ */
 char *ScriptEnvJson (ScriptEnv *globalEnv, u64 id);
 
-// 执行脚本；有非 null 返回值时 resultJson 为 JSON 字符串，否则为 NULL。返回空 TextBuffer 表示成功。
+/**
+ * @brief 执行一段脚本。
+ * @param self 执行脚本的实体 ID，0 表示全局。
+ * @param source 脚本源码。
+ * @param env 脚本环境。
+ * @param resultJson 输出返回值 JSON，无返回值时为 NULL；调用方负责 free。
+ * @return 错误文本；长度为 0 表示执行成功。
+ */
 TextBuffer ScriptRun (u64 self, const char *source, ScriptEnv *env, char **resultJson);
+/**
+ * @brief 以指定 self 和调用者执行函数文本。
+ * @param self 执行函数的目标实体 ID。
+ * @param functionText 函数文本。
+ * @param env 脚本环境。
+ * @param caller 调用者实体 ID。
+ * @param resultJson 输出返回值 JSON，无返回值时为 NULL；调用方负责 free。
+ * @return 错误文本；长度为 0 表示执行成功。
+ */
 TextBuffer ScriptRunFunction (u64 self, const char *functionText, ScriptEnv *env,
                               u64 caller, char **resultJson);
 
-// 调用物件本地事件函数（ontouch/ondrag/dragged），userId 作为唯一参数。
-// 事件不存在或为 null 时返回空 TextBuffer。
+/**
+ * @brief 调用物件的本地事件函数。
+ * @param self 物件 ID。
+ * @param event 事件名，如 ontouch、ondrag、dragged。
+ * @param userId 作为唯一参数传入的用户 ID。
+ * @param env 脚本环境。
+ * @return 错误文本；事件不存在或执行成功时长度为 0。
+ */
 TextBuffer ScriptRunObjectEvent (u64 self, const char *event, u64 userId,
                                  ScriptEnv *env);
 

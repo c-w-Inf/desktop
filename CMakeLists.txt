@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.16)
-project(image_canvas C)
+project(desktop C)
 
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
@@ -67,55 +67,85 @@ set(FONT_PATHS
     /System/Library/Fonts/Supplemental
     "$ENV{WINDIR}/Fonts")
 
-find_file(IMAGE_CANVAS_UI_FONT
+find_file(DESKTOP_UI_FONT
     NAMES WenQuanYiMicroHei.ttf NotoSansCJKsc-Regular.otf
           NotoSansCJK-Regular.otf
     PATHS ${FONT_PATHS} NO_DEFAULT_PATH)
-find_file(IMAGE_CANVAS_MONO_FONT
+find_file(DESKTOP_MONO_FONT
     NAMES WenQuanYiMicroHeiMono.ttf NotoSansMonoCJKsc-Regular.otf
           NotoSansMonoCJK-Regular.otf
     PATHS ${FONT_PATHS} NO_DEFAULT_PATH)
-find_file(IMAGE_CANVAS_FALLBACK_FONT
+find_file(DESKTOP_FALLBACK_FONT
     NAMES unifont.otf unifont.ttf Unifont.otf
     PATHS ${FONT_PATHS} NO_DEFAULT_PATH)
 set(FONT_CACHE "${CMAKE_BINARY_DIR}/fonts")
 file(MAKE_DIRECTORY "${FONT_CACHE}")
-if(NOT IMAGE_CANVAS_UI_FONT)
-    set(IMAGE_CANVAS_UI_FONT "${FONT_CACHE}/WenQuanYiMicroHei.ttf")
+if(NOT DESKTOP_UI_FONT)
+    set(DESKTOP_UI_FONT "${FONT_CACHE}/WenQuanYiMicroHei.ttf")
     file(DOWNLOAD
         "https://github.com/notofonts/noto-cjk/raw/main/Sans/OTF/SimplifiedChinese/NotoSansCJKsc-Regular.otf"
-        "${IMAGE_CANVAS_UI_FONT}" STATUS _font_status)
+        "${DESKTOP_UI_FONT}" STATUS _font_status)
     list(GET _font_status 0 _font_code)
     if(_font_code)
         message(FATAL_ERROR "无法下载中文字体: ${_font_status}")
     endif()
 endif()
-if(NOT IMAGE_CANVAS_MONO_FONT)
-    set(IMAGE_CANVAS_MONO_FONT "${FONT_CACHE}/NotoSansMonoCJKsc-Regular.otf")
+if(NOT DESKTOP_MONO_FONT)
+    set(DESKTOP_MONO_FONT "${FONT_CACHE}/NotoSansMonoCJKsc-Regular.otf")
     file(DOWNLOAD
         "https://github.com/notofonts/noto-cjk/raw/main/Sans/Mono/NotoSansMonoCJKsc-Regular.otf"
-        "${IMAGE_CANVAS_MONO_FONT}" STATUS _font_status)
+        "${DESKTOP_MONO_FONT}" STATUS _font_status)
     list(GET _font_status 0 _font_code)
     if(_font_code)
         message(FATAL_ERROR "无法下载等宽字体: ${_font_status}")
     endif()
 endif()
-if(NOT IMAGE_CANVAS_FALLBACK_FONT)
-    set(IMAGE_CANVAS_FALLBACK_FONT "${FONT_CACHE}/unifont.otf")
+if(NOT DESKTOP_FALLBACK_FONT)
+    set(DESKTOP_FALLBACK_FONT "${FONT_CACHE}/unifont.otf")
     file(DOWNLOAD
         "https://unifoundry.com/pub/unifont/unifont-16.0.04/font-builds/unifont-16.0.04.otf"
-        "${IMAGE_CANVAS_FALLBACK_FONT}" STATUS _font_status)
+        "${DESKTOP_FALLBACK_FONT}" STATUS _font_status)
     list(GET _font_status 0 _font_code)
     if(_font_code)
-        set(IMAGE_CANVAS_FALLBACK_FONT "${IMAGE_CANVAS_UI_FONT}")
+        set(DESKTOP_FALLBACK_FONT "${DESKTOP_UI_FONT}")
     endif()
 endif()
-message(STATUS "UI font: ${IMAGE_CANVAS_UI_FONT}")
-message(STATUS "Mono font: ${IMAGE_CANVAS_MONO_FONT}")
-message(STATUS "Fallback font: ${IMAGE_CANVAS_FALLBACK_FONT}")
+message(STATUS "UI font: ${DESKTOP_UI_FONT}")
+message(STATUS "Mono font: ${DESKTOP_MONO_FONT}")
+message(STATUS "Fallback font: ${DESKTOP_FALLBACK_FONT}")
 
 if(NOT EMSCRIPTEN)
-    file(GLOB IMAGE_CANVAS_SOURCES CONFIGURE_DEPENDS src/*.c)
+    set(DESKTOP_COMMON_SOURCES
+        src/assets.c
+        src/control.c
+        src/cutils.c
+        src/entity.c
+        src/menu.c
+        src/menu_array.c
+        src/netutils.c
+        src/net.c
+        src/object.c
+        src/strmap.c
+        src/user.c
+        src/utils/idgroup.c
+        src/utils/path.c
+        src/utils/random.c
+        src/utils/rawfile.c
+        src/utils/signal.c
+        src/utils/str.c
+        src/utils/textbuffer.c)
+    set(DESKTOP_CLIENT_SOURCES ${DESKTOP_COMMON_SOURCES}
+        src/client.c
+        src/main.c
+        src/save.c
+        src/ui.c
+        src/view.c)
+    set(DESKTOP_SERVER_SOURCES ${DESKTOP_COMMON_SOURCES}
+        src/hjson.c
+        src/main_server.c
+        src/save.c
+        src/script.c
+        src/server.c)
 
     add_library(tinyfiledialogs STATIC
         third_party/tinyfiledialogs/tinyfiledialogs.c)
@@ -127,56 +157,61 @@ if(NOT EMSCRIPTEN)
         target_compile_options(tinyfiledialogs PRIVATE -w)
     endif()
 
-    add_executable(image_canvas ${IMAGE_CANVAS_SOURCES})
-    target_include_directories(image_canvas PRIVATE src third_party)
-    set_target_properties(image_canvas PROPERTIES
+    function(add_desktop_target DESKTOP_TARGET DESKTOP_DEFINE DESKTOP_SOURCE_FILES)
+    add_executable(${DESKTOP_TARGET} ${DESKTOP_SOURCE_FILES})
+    target_include_directories(${DESKTOP_TARGET} PRIVATE src third_party)
+    target_compile_definitions(${DESKTOP_TARGET} PRIVATE ${DESKTOP_DEFINE}=1)
+    set_target_properties(${DESKTOP_TARGET} PROPERTIES
         RUNTIME_OUTPUT_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}")
-    add_custom_command(TARGET image_canvas POST_BUILD
+    add_custom_command(TARGET ${DESKTOP_TARGET} POST_BUILD
         COMMAND ${CMAKE_COMMAND} -E make_directory
                 "${CMAKE_CURRENT_SOURCE_DIR}/assets"
         COMMAND ${CMAKE_COMMAND} -E copy_if_different
-                "${IMAGE_CANVAS_UI_FONT}"
+                "${DESKTOP_UI_FONT}"
                 "${CMAKE_CURRENT_SOURCE_DIR}/assets/WenQuanYiMicroHei.ttf"
         COMMAND ${CMAKE_COMMAND} -E copy_if_different
-                "${IMAGE_CANVAS_MONO_FONT}"
+                "${DESKTOP_MONO_FONT}"
                 "${CMAKE_CURRENT_SOURCE_DIR}/assets/WenQuanYiMicroHeiMono.ttf"
         COMMAND ${CMAKE_COMMAND} -E copy_if_different
-                "${IMAGE_CANVAS_FALLBACK_FONT}"
+                "${DESKTOP_FALLBACK_FONT}"
                 "${CMAKE_CURRENT_SOURCE_DIR}/assets/unifont.otf")
-    target_link_libraries(image_canvas PRIVATE
+    target_link_libraries(${DESKTOP_TARGET} PRIVATE
         tinyfiledialogs PkgConfig::JSONC PkgConfig::LIBUV ZLIB::ZLIB)
     if(TARGET raylib)
-        target_link_libraries(image_canvas PRIVATE raylib)
+        target_link_libraries(${DESKTOP_TARGET} PRIVATE raylib)
     else()
-        target_link_libraries(image_canvas PRIVATE PkgConfig::RAYLIB)
+        target_link_libraries(${DESKTOP_TARGET} PRIVATE PkgConfig::RAYLIB)
     endif()
     if(TARGET libzip::zip)
-        target_link_libraries(image_canvas PRIVATE libzip::zip)
+        target_link_libraries(${DESKTOP_TARGET} PRIVATE libzip::zip)
     else()
-        target_link_libraries(image_canvas PRIVATE PkgConfig::LIBZIP)
+        target_link_libraries(${DESKTOP_TARGET} PRIVATE PkgConfig::LIBZIP)
     endif()
     if(WIN32)
-        target_compile_definitions(image_canvas PRIVATE
+        target_compile_definitions(${DESKTOP_TARGET} PRIVATE
             WIN32_LEAN_AND_MEAN NOGDI NOUSER _CRT_SECURE_NO_WARNINGS)
-        target_link_libraries(image_canvas PRIVATE
+        target_link_libraries(${DESKTOP_TARGET} PRIVATE
             ws2_32 iphlpapi userenv psapi comdlg32 ole32 shell32 uuid)
     else()
-        target_link_libraries(image_canvas PRIVATE m ${CMAKE_DL_LIBS})
+        target_link_libraries(${DESKTOP_TARGET} PRIVATE m ${CMAKE_DL_LIBS})
         if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
-            set_target_properties(image_canvas PROPERTIES
+            set_target_properties(${DESKTOP_TARGET} PROPERTIES
                 BUILD_RPATH "${CMAKE_CURRENT_SOURCE_DIR}/third_party/raylib/lib")
         endif()
     endif()
     if(MSVC)
-        target_compile_options(image_canvas PRIVATE /W4)
+        target_compile_options(${DESKTOP_TARGET} PRIVATE /W4)
     else()
-        target_compile_options(image_canvas PRIVATE -Wall -Wextra)
+        target_compile_options(${DESKTOP_TARGET} PRIVATE -Wall -Wextra)
     endif()
+    endfunction()
+    add_desktop_target(desktop DESKTOP_CLIENT "${DESKTOP_CLIENT_SOURCES}")
+    add_desktop_target(desktop_server DESKTOP_SERVER "${DESKTOP_SERVER_SOURCES}")
 else()
-    add_executable(image_canvas
+    add_executable(desktop
         src/assets.c
+        src/net.c
         src/client.c
-        src/client_ui.c
         src/cutils.c
         src/entity.c
         src/main_web.c
@@ -187,34 +222,41 @@ else()
         src/strmap.c
         src/ui.c
         src/user.c
-        src/utils.c
+        src/utils/idgroup.c
+        src/utils/path.c
+        src/utils/random.c
+        src/utils/rawfile.c
+        src/utils/signal.c
+        src/utils/str.c
+        src/utils/textbuffer.c
         src/view.c)
-    target_include_directories(image_canvas PRIVATE src third_party)
+    target_include_directories(desktop PRIVATE src third_party)
+    target_compile_definitions(desktop PRIVATE DESKTOP_CLIENT=1)
     if(TARGET raylib)
-        target_link_libraries(image_canvas PRIVATE raylib)
+        target_link_libraries(desktop PRIVATE raylib)
     else()
-        target_link_libraries(image_canvas PRIVATE PkgConfig::RAYLIB)
+        target_link_libraries(desktop PRIVATE PkgConfig::RAYLIB)
     endif()
-    set_target_properties(image_canvas PROPERTIES
+    set_target_properties(desktop PROPERTIES
         RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/web"
         SUFFIX ".html")
-    add_custom_command(TARGET image_canvas PRE_LINK
+    add_custom_command(TARGET desktop PRE_LINK
         COMMAND ${CMAKE_COMMAND} -E make_directory
                 "${CMAKE_CURRENT_SOURCE_DIR}/assets"
         COMMAND ${CMAKE_COMMAND} -E copy_if_different
-                "${IMAGE_CANVAS_UI_FONT}"
+                "${DESKTOP_UI_FONT}"
                 "${CMAKE_CURRENT_SOURCE_DIR}/assets/WenQuanYiMicroHei.ttf"
         COMMAND ${CMAKE_COMMAND} -E copy_if_different
-                "${IMAGE_CANVAS_MONO_FONT}"
+                "${DESKTOP_MONO_FONT}"
                 "${CMAKE_CURRENT_SOURCE_DIR}/assets/WenQuanYiMicroHeiMono.ttf"
         COMMAND ${CMAKE_COMMAND} -E copy_if_different
-                "${IMAGE_CANVAS_FALLBACK_FONT}"
+                "${DESKTOP_FALLBACK_FONT}"
                 "${CMAKE_CURRENT_SOURCE_DIR}/assets/unifont.otf")
-    add_custom_command(TARGET image_canvas POST_BUILD
+    add_custom_command(TARGET desktop POST_BUILD
         COMMAND ${CMAKE_COMMAND} -E copy_if_different
-                "$<TARGET_FILE:image_canvas>"
+                "$<TARGET_FILE:desktop>"
                 "${CMAKE_BINARY_DIR}/web/index.html")
-    target_link_options(image_canvas PRIVATE
+    target_link_options(desktop PRIVATE
         -sUSE_GLFW=3
         --pre-js "${CMAKE_CURRENT_SOURCE_DIR}/src/web_font_cache.js"
         -lwebsocket.js
@@ -226,8 +268,8 @@ else()
         -sENVIRONMENT=web
         -sEXPORTED_RUNTIME_METHODS=ccall)
     if(MSVC)
-        target_compile_options(image_canvas PRIVATE /W4)
+        target_compile_options(desktop PRIVATE /W4)
     else()
-        target_compile_options(image_canvas PRIVATE -Wall -Wextra)
+        target_compile_options(desktop PRIVATE -Wall -Wextra)
     endif()
 endif()

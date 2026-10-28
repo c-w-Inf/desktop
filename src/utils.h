@@ -1,55 +1,17 @@
 #ifndef UTILS_H
 #define UTILS_H
 
-#include <stdbool.h>
-#include <stddef.h>
-#include <stdint.h>
-
-typedef uint64_t u64;
-
-char *StrDup (const char *text);
-
-/* 文件名扩展名判断；extension 包含点，大小写不敏感。 */
-bool PathHasExtension (const char *path, const char *extension);
-/* 是否为本程序支持的图片文件。 */
-bool PathIsImage (const char *path);
-/* 安装 Ctrl+C / 终止信号处理器，仅设置停止标志。 */
-void UtilsInstallStopHandlers (void);
-bool UtilsStopRequested (void);
-
-u64 RandomNext (void);
-u64 RandomBounded (u64 limit);
+#include "utils/types.h"
+#include "utils/str.h"
+#include "utils/path.h"
+#include "utils/rawfile.h"
+#include "utils/signal.h"
+#include "utils/random.h"
+#include "utils/idgroup.h"
+#include "utils/textbuffer.h"
 
 #ifndef strdup
 #define strdup StrDup
 #endif
-
-typedef struct IdGroup {
-    u64 *ids;
-    int count;
-    int capacity;
-} IdGroup;
-
-IdGroup IdGroupCreate (void);
-void IdGroupUnload (IdGroup *group);
-void IdGroupClear (IdGroup *group);
-
-bool IdGroupAdd (IdGroup *group, u64 id);
-bool IdGroupRemoveAt (IdGroup *group, int index);
-bool IdGroupMove (IdGroup *group, int from, int to);
-bool IdGroupCopy (IdGroup *group, const u64 *ids, int count);
-
-typedef struct TextBuffer {
-    char *data;
-    size_t length;
-    size_t capacity;
-} TextBuffer;
-
-bool TextBufferReserve (TextBuffer *buffer, size_t extra);
-bool TextBufferAppendN (TextBuffer *buffer, const char *text, size_t length);
-bool TextBufferAppend (TextBuffer *buffer, const char *text);
-bool TextBufferAppendChar (TextBuffer *buffer, char ch);
-char *TextBufferTake (TextBuffer *buffer);
-void TextBufferFree (TextBuffer *buffer);
 
 #endif

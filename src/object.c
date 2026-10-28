@@ -12,6 +12,7 @@
 static StrMap *objectNames;
 static u64 timestampCounter = 0;
 
+#ifdef DESKTOP_SERVER
 struct ObjectVisibility {
     u64 *userIds;
     bool *hidden;
@@ -51,16 +52,27 @@ static bool VisibilityReserve (ObjectVisibility *visibility, int needed) {
     visibility->capacity = capacity;
     return true;
 }
+#endif
 
 bool ObjectMenuAdd (Object* object, const char* name, const char* func) {
     if (object == NULL || name == NULL) return false;
+#ifdef DESKTOP_SERVER
     return MenuArrayAdd (&object->menuNames, &object->menuFuncs, &object->menuSize,
                          &object->menuCapacity, name, func);
+#else
+    (void)func;
+    return false;
+#endif
 }
 
 void ObjectMenuClear (Object* object) {
     if (object == NULL) return;
+#ifdef DESKTOP_SERVER
     MenuArrayClear (&object->menuNames, &object->menuFuncs, &object->menuSize);
+#else
+    char **funcs = NULL;
+    MenuArrayClear (&object->menuNames, &funcs, &object->menuSize);
+#endif
 }
 
 int ObjectMenuCount (const Object* object) {
@@ -73,16 +85,29 @@ const char* ObjectMenuName (const Object* object, int index) {
 }
 
 const char* ObjectMenuFunc (const Object* object, int index) {
+#ifdef DESKTOP_SERVER
     if (object == NULL || object->menuFuncs == NULL ||
         index < 0 || index >= object->menuSize) return NULL;
     return object->menuFuncs[index];
+#else
+    (void)object;
+    (void)index;
+    return NULL;
+#endif
 }
 
 bool ObjectMenuSetNames (Object* object, const char* const* names, int count) {
     if (object == NULL) return false;
+#ifdef DESKTOP_SERVER
     return MenuArraySetNames (&object->menuNames, &object->menuFuncs,
                               &object->menuSize, &object->menuCapacity,
                               names, count);
+#else
+    char **funcs = NULL;
+    return MenuArraySetNames (&object->menuNames, &funcs,
+                              &object->menuSize, &object->menuCapacity,
+                              names, count);
+#endif
 }
 
 static u64 NextTimestamp (void) {
@@ -95,7 +120,7 @@ bool ObjectNameUsed (const char *name, const Object *exclude) {
     return exclude == NULL || existing != exclude;
 }
 
-Object *ObjectFindByName (const char *name) {
+Object *ObjectFind (const char *name) {
     void *object = NULL;
     if (name == NULL || objectNames == NULL ||
         !StrMapGet (objectNames, name, &object))
@@ -103,24 +128,12 @@ Object *ObjectFindByName (const char *name) {
     return object;
 }
 
-Object *ObjectFindById (u64 id) {
-    if (id == 0 || objectNames == NULL) return NULL;
-    int total = StrMapCount (objectNames);
-    for (int i = 0; i < total; i++) {
-        Object *object = NULL;
-        if (StrMapAt (objectNames, i, NULL, (void **)&object) &&
-            object != NULL && object->id == id)
-            return object;
-    }
-    return NULL;
-}
-
 static bool RegisterObject (Object *object) {
     if (object == NULL) return false;
     if (objectNames == NULL) objectNames = StrMapCreate ();
     if (objectNames == NULL) return false;
     if (!StrMapAdd (objectNames, object->name, object)) return false;
-    if (!EntityRegister (object->id, object)) {
+    if (!EntityRegister (object->id, object, ENTITY_KIND_OBJECT)) {
         StrMapRemove (objectNames, object->name);
         return false;
     }
@@ -171,13 +184,17 @@ Object *ObjectAdd (const char *name, Vector2 center, int layer,
     object->assets = IdGroupCreate ();
     object->assetIndex = 0;
     object->menuNames = NULL;
+#ifdef DESKTOP_SERVER
     object->menuFuncs = NULL;
+#endif
     object->menuSize = 0;
     object->menuCapacity = 0;
     object->layer = layer;
     object->timestamp = timestamp;
     object->hidden = false;
+#ifdef DESKTOP_SERVER
     object->visibility = NULL;
+#endif
     if (timestamp > timestampCounter) timestampCounter = timestamp;
     snprintf (object->name, sizeof (object->name), "%s", name);
 
@@ -206,6 +223,7 @@ int ObjectCompareDrawOrder (const Object *a, const Object *b) {
     return 0;
 }
 
+#ifdef DESKTOP_CLIENT
 Object *ObjectPick (Vector2 world) {
     Object *top = NULL;
 
@@ -217,12 +235,12 @@ Object *ObjectPick (Vector2 world) {
         Asset *asset = ObjectDisplayedAsset (object);
         if (asset == NULL) continue;
 
-        float left = object->pos.x - asset->width / 2.0f;
-        float topEdge = object->pos.y - asset->height / 2.0f;
+        float left = object->pos.x - AssetTexture(asset).width / 2.0f;
+        float topEdge = object->pos.y - AssetTexture(asset).height / 2.0f;
         int x = (int)floorf (world.x - left);
         int y = (int)floorf (world.y - topEdge);
 
-        // 只有 a 通道恰好为 255 的像素才算命中，不使用阈值
+
         bool hit = AssetIsOpaqueAt (asset, x, y);
 
         if (hit && (top == NULL || ObjectCompareDrawOrder (object, top) > 0)) top = object;
@@ -231,6 +249,7 @@ Object *ObjectPick (Vector2 world) {
 
     return top;
 }
+#endif
 
 bool ObjectRename (Object *object, const char *newName) {
     if (object == NULL || newName == NULL || newName[0] == '\0') return false;
@@ -254,15 +273,24 @@ bool ObjectDelete (Object *object) {
     if (object == NULL) return false;
     if (!RemoveObject (object)) return false;
 
+#ifdef DESKTOP_SERVER
     MenuArrayFree (&object->menuNames, &object->menuFuncs, &object->menuSize,
                    &object->menuCapacity);
+#else
+    char **funcs = NULL;
+    MenuArrayFree (&object->menuNames, &funcs, &object->menuSize,
+                   &object->menuCapacity);
+#endif
     IdGroupUnload (&object->assets);
+#ifdef DESKTOP_SERVER
     VisibilityFree (object->visibility);
+#endif
     free (object);
     return true;
 }
 
 bool ObjectIsHiddenForUser (const Object *object, u64 userId) {
+#ifdef DESKTOP_SERVER
     if (object == NULL) return false;
     if (object->visibility == NULL) return object->hidden;
     for (int i = 0; i < object->visibility->count; i++) {
@@ -270,9 +298,14 @@ bool ObjectIsHiddenForUser (const Object *object, u64 userId) {
             return object->visibility->hidden[i];
     }
     return object->hidden;
+#else
+    (void)userId;
+    return object != NULL && object->hidden;
+#endif
 }
 
 bool ObjectSetHiddenForUser (Object *object, u64 userId, bool hidden) {
+#ifdef DESKTOP_SERVER
     if (object == NULL) return false;
     if (object->visibility == NULL) {
         object->visibility = calloc (1, sizeof (ObjectVisibility));
@@ -291,19 +324,27 @@ bool ObjectSetHiddenForUser (Object *object, u64 userId, bool hidden) {
     visibility->hidden[visibility->count] = hidden;
     visibility->count++;
     return true;
+#else
+    (void)object;
+    (void)userId;
+    (void)hidden;
+    return false;
+#endif
 }
 
 void ObjectSetHidden (Object *object, bool hidden) {
     if (object == NULL) return;
+#ifdef DESKTOP_SERVER
     VisibilityFree (object->visibility);
     object->visibility = NULL;
+#endif
     object->hidden = hidden;
 }
 
 void ObjectTouch (Object *object) {
     if (object == NULL) return;
 
-    // 外部同步可能写入更大的时间戳，先让计数器追上当前最大时间戳。
+
     int total = StrMapCount (objectNames);
     for (int i = 0; i < total; i++) {
         Object *other = NULL;
@@ -332,14 +373,21 @@ void ObjectUnload (void) {
         if (!StrMapAt (objectNames, i, NULL, (void **)&object) || object == NULL)
             continue;
         EntityUnregister (object->id);
+#ifdef DESKTOP_SERVER
         MenuArrayFree (&object->menuNames, &object->menuFuncs, &object->menuSize,
                        &object->menuCapacity);
+#else
+        char **funcs = NULL;
+        MenuArrayFree (&object->menuNames, &funcs, &object->menuSize,
+                       &object->menuCapacity);
+#endif
         IdGroupUnload (&object->assets);
+#ifdef DESKTOP_SERVER
         VisibilityFree (object->visibility);
+#endif
         free (object);
     }
     StrMapDestroy (objectNames);
     objectNames = NULL;
     timestampCounter = 0;
 }
-

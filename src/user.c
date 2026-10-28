@@ -19,17 +19,19 @@ static User *CreateUser (u64 id, const char *name) {
     user->hasCursor = false;
     user->x = 0.0f;
     user->y = 0.0f;
-    user->color = 0x000000FFu; // RGBA black
+    user->color = 0x000000FFu;
     user->canscript = true;
     user->menuNames = NULL;
+#ifdef DESKTOP_SERVER
     user->menuFuncs = NULL;
+#endif
     user->menuSize = 0;
     user->menuCapacity = 0;
     return user;
 }
 
 static bool AppendUser (User *user) {
-    if (!EntityRegister (user->id, user)) return false;
+    if (!EntityRegister (user->id, user, ENTITY_KIND_USER)) return false;
     if (userCount == userCapacity) {
         int capacity = (userCapacity == 0) ? 8 : userCapacity * 2;
         User **list = realloc (users, (size_t)capacity * sizeof (User *));
@@ -47,8 +49,14 @@ static bool AppendUser (User *user) {
 static void RemoveUserAt (int index) {
     User *user = users[index];
     EntityUnregister (user->id);
+#ifdef DESKTOP_SERVER
     MenuArrayFree (&user->menuNames, &user->menuFuncs, &user->menuSize,
                    &user->menuCapacity);
+#else
+    char **funcs = NULL;
+    MenuArrayFree (&user->menuNames, &funcs, &user->menuSize,
+                   &user->menuCapacity);
+#endif
     free (user);
     for (int i = index; i < userCount - 1; i++) users[i] = users[i + 1];
     userCount--;
@@ -64,8 +72,14 @@ void UserInit (void) {
 void UserUnload (void) {
     for (int i = 0; i < userCount; i++) {
         EntityUnregister (users[i]->id);
+#ifdef DESKTOP_SERVER
         MenuArrayFree (&users[i]->menuNames, &users[i]->menuFuncs,
                        &users[i]->menuSize, &users[i]->menuCapacity);
+#else
+        char **funcs = NULL;
+        MenuArrayFree (&users[i]->menuNames, &funcs,
+                       &users[i]->menuSize, &users[i]->menuCapacity);
+#endif
         free (users[i]);
     }
     free (users);
@@ -74,16 +88,9 @@ void UserUnload (void) {
     userCapacity = 0;
 }
 
-User *UserFind (u64 id) {
-    for (int i = 0; i < userCount; i++) {
-        if (users[i]->id == id) return users[i];
-    }
-    return NULL;
-}
-
 User *UserAdd (u64 id, const char *name) {
     if (id == 0 || name == NULL || name[0] == '\0') return NULL;
-    if (UserFind (id) != NULL) return NULL;
+    if ((User *)EntityFind (id) != NULL) return NULL;
 
     User *user = CreateUser (id, name);
     if (user == NULL) return NULL;
@@ -105,20 +112,37 @@ bool UserRemove (u64 id) {
 
 bool UserMenuAdd (User* user, const char* name, const char* func) {
     if (user == NULL || name == NULL) return false;
+#ifdef DESKTOP_SERVER
     return MenuArrayAdd (&user->menuNames, &user->menuFuncs, &user->menuSize,
                          &user->menuCapacity, name, func);
+#else
+    (void)func;
+    return false;
+#endif
 }
 
 void UserMenuClear (User* user) {
     if (user == NULL) return;
+#ifdef DESKTOP_SERVER
     MenuArrayClear (&user->menuNames, &user->menuFuncs, &user->menuSize);
+#else
+    char **funcs = NULL;
+    MenuArrayClear (&user->menuNames, &funcs, &user->menuSize);
+#endif
 }
 
 bool UserMenuSetNames (User* user, const char* const* names, int count) {
     if (user == NULL) return false;
+#ifdef DESKTOP_SERVER
     return MenuArraySetNames (&user->menuNames, &user->menuFuncs,
                               &user->menuSize, &user->menuCapacity,
                               names, count);
+#else
+    char **funcs = NULL;
+    return MenuArraySetNames (&user->menuNames, &funcs,
+                              &user->menuSize, &user->menuCapacity,
+                              names, count);
+#endif
 }
 
 int UserMenuCount (const User* user) {
@@ -131,13 +155,20 @@ const char* UserMenuName (const User* user, int index) {
 }
 
 const char* UserMenuFunc (const User* user, int index) {
+#ifdef DESKTOP_SERVER
     if (user == NULL || user->menuFuncs == NULL ||
         index < 0 || index >= user->menuSize) return NULL;
     return user->menuFuncs[index];
+#else
+    (void)user;
+    (void)index;
+    return NULL;
+#endif
 }
 
 void UserSetCursor (u64 id, bool hasCursor, float x, float y) {
-    User *user = UserFind (id);
+    if (EntityKindOf (id) != ENTITY_KIND_USER) return;
+    User *user = (User *)EntityFind (id);
     if (user == NULL) return;
     user->hasCursor = hasCursor;
     user->x = x;
@@ -145,13 +176,15 @@ void UserSetCursor (u64 id, bool hasCursor, float x, float y) {
 }
 
 void UserSetColor (u64 id, uint32_t color) {
-    User *user = UserFind (id);
+    if (EntityKindOf (id) != ENTITY_KIND_USER) return;
+    User *user = (User *)EntityFind (id);
     if (user == NULL) return;
     user->color = color;
 }
 
 void UserSetCanScript (u64 id, bool canscript) {
-    User *user = UserFind (id);
+    if (EntityKindOf (id) != ENTITY_KIND_USER) return;
+    User *user = (User *)EntityFind (id);
     if (user == NULL) return;
     user->canscript = canscript;
 }
@@ -169,5 +202,3 @@ IdGroup UserIds (void) {
     for (int i = 0; i < userCount; i++) IdGroupAdd (&group, users[i]->id);
     return group;
 }
-
-

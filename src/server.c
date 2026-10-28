@@ -27,7 +27,7 @@
 
 typedef struct {
     int clientIndex;
-    uint8_t type;
+    enum NetPacketType type;
     unsigned char *payload;
     size_t length;
 } ServerRequest;
@@ -37,36 +37,14 @@ static int serverRequestCount;
 static int serverRequestCapacity;
 
 
-static u64 *deletedObjectIds;
-static int deletedObjectCount;
-static int deletedObjectCapacity;
-
-static bool ServerObjectIdDeleted (u64 id) {
-    for (int i = 0; i < deletedObjectCount; i++) {
-        if (deletedObjectIds[i] == id) return true;
-    }
-    return false;
-}
-
-static bool ServerTombstoneObject (u64 id) {
-    if (deletedObjectCount == deletedObjectCapacity) {
-        int capacity = (deletedObjectCapacity == 0) ? 16 : deletedObjectCapacity * 2;
-        u64 *ids = realloc (deletedObjectIds, (size_t)capacity * sizeof (u64));
-        if (ids == NULL) return false;
-        deletedObjectIds = ids;
-        deletedObjectCapacity = capacity;
-    }
-    deletedObjectIds[deletedObjectCount++] = id;
-    return true;
-}
 
 
 static Asset *ServerAssetFind (u64 id) {
-    return AssetFindById (id);
+    return EntityKindOf (id) == ENTITY_KIND_ASSET ? (Asset *)EntityFind (id) : NULL;
 }
 
 static Object *ServerObjectFind (u64 id) {
-    return ObjectFindById (id);
+    return EntityKindOf (id) == ENTITY_KIND_OBJECT ? (Object *)EntityFind (id) : NULL;
 }
 
 static u64 nextEntityId = 1;
@@ -98,7 +76,8 @@ static void ServerMakeUniqueName (const char *requested, char *name, size_t size
             used = ObjectNameUsed (name, exclude);
         } else {
             Asset *exclude = EntityFind (excludeId);
-            used = AssetNameUsed (name, exclude);
+            Asset *existing = AssetFind (name);
+            used = existing != NULL && existing != exclude;
         }
         if (!used) return;
 
@@ -131,9 +110,6 @@ typedef struct {
 static ServerClient serverClients[NET_MAX_CLIENTS];
 static ScriptEnv *serverScriptEnv;
 static char serverSavePath[1024];
-static int pendingLockClient = -1;
-static u64 pendingLockObjectId;
-static bool pendingLockFailureSent;
 static bool serverSuppressObjectBroadcast;
 
 static void ServerBeginDisconnect (ServerClient *client);
@@ -169,76 +145,6 @@ static u64 ServerNewUserId (void) {
     } while (used);
     return id;
 }
-
-static bool ServerBuildSnapshot (Buffer *frame, u64 selfId) {
-    Buffer payload = {0};
-    IdGroup assetIds = AssetIds ();
-    IdGroup objectIds = ObjectIds ();
-    bool ok = BufferPutU32 (&payload, NET_PROTOCOL_VERSION) &&
-              BufferPutU64 (&payload, selfId) &&
-              BufferPutU32 (&payload, (uint32_t)assetIds.count);
-
-    for (int i = 0; ok && i < assetIds.count; i++) {
-        Asset *asset = EntityFind (assetIds.ids[i]);
-        if (asset == NULL) {
-            ok = false;
-            break;
-        }
-        ok = BufferPutU64 (&payload, asset->id) &&
-             BufferPutString (&payload, asset->name) &&
-             BufferPutString (&payload, asset->ext) &&
-             BufferPutU32 (&payload, (uint32_t)asset->fileSize) &&
-             BufferAppend (&payload, asset->fileData, (size_t)asset->fileSize);
-    }
-
-    if (ok) ok = BufferPutU32 (&payload, (uint32_t)objectIds.count);
-    for (int i = 0; ok && i < objectIds.count; i++) {
-        Object *object = EntityFind (objectIds.ids[i]);
-        if (object == NULL) {
-            ok = false;
-            break;
-        }
-        ok = BufferPutU64 (&payload, object->id) &&
-             BufferPutString (&payload, object->name) &&
-             BufferPutF32 (&payload, object->pos.x) &&
-             BufferPutF32 (&payload, object->pos.y) &&
-             BufferPutU32 (&payload, (uint32_t)object->layer) &&
-             BufferPutU64 (&payload, object->timestamp) &&
-             BufferPutU8 (&payload, ObjectIsHiddenForUser (object, selfId) ? 1 : 0) &&
-             BufferPutU32 (&payload, (uint32_t)object->assets.count) &&
-             BufferPutU32 (&payload, (uint32_t)object->assetIndex);
-        for (int a = 0; ok && a < object->assets.count; a++)
-            ok = BufferPutU64 (&payload, object->assets.ids[a]);
-        if (ok) ok = BufferPutU64 (&payload, object->lockOwnerId);
-    }
-
-    if (ok) {
-        IdGroup userIds = UserIds ();
-        ok = BufferPutU32 (&payload, (uint32_t)userIds.count);
-        for (int i = 0; ok && i < userIds.count; i++) {
-            User *user = UserFind (userIds.ids[i]);
-            if (user == NULL) {
-                ok = false;
-                break;
-            }
-            ok = BufferPutU64 (&payload, user->id) &&
-                 BufferPutString (&payload, user->name) &&
-                 BufferPutU32 (&payload, user->color) &&
-                 BufferPutU8 (&payload, user->canscript ? 1 : 0) &&
-                 BufferPutU8 (&payload, user->hasCursor ? 1 : 0) &&
-                 BufferPutF32 (&payload, user->x) &&
-                 BufferPutF32 (&payload, user->y);
-        }
-        IdGroupUnload (&userIds);
-    }
-
-    if (ok) ok = FrameMake (frame, NET_SNAPSHOT, &payload);
-    BufferFree (&payload);
-    IdGroupUnload (&assetIds);
-    IdGroupUnload (&objectIds);
-    return ok;
-}
-
 
 static void ServerClientMaybeClose (ServerClient *client) {
     if (!client->active || !client->closing || client->closeSent) return;
@@ -289,7 +195,7 @@ static void ServerClientData (NetutilStream *stream, const unsigned char *data,
     ServerProcessRequests ();
 }
 
-static bool ServerQueuePush (int clientIndex, uint8_t type,
+static bool ServerQueuePush (int clientIndex, enum NetPacketType type,
                              const unsigned char *payload, size_t length) {
     if (serverRequestCount == serverRequestCapacity) {
         int capacity = (serverRequestCapacity == 0) ? 32 : serverRequestCapacity * 2;
@@ -355,20 +261,6 @@ static void ServerSendAllMenus (int clientIndex) {
     ServerSendMenu (clientIndex, serverClients[clientIndex].userId);
 }
 
-static void ServerSendSnapshot (int clientIndex) {
-    ServerClient *client = &serverClients[clientIndex];
-    if (!client->active) return;
-
-    Buffer frame = {0};
-    if (!ServerBuildSnapshot (&frame, client->userId)) {
-        client->closing = true;
-        return;
-    }
-    ServerClientEnqueue (client, frame.data, frame.len);
-    BufferFree (&frame);
-    ServerSendAllMenus (clientIndex);
-}
-
 static void ServerBroadcastUserRecord (const User *user) {
     Buffer frame = {0};
     if (FrameUserState (&frame, user->id, user->name, user->color,
@@ -378,19 +270,21 @@ static void ServerBroadcastUserRecord (const User *user) {
 }
 
 static void ServerBroadcastUserState (const ServerClient *client) {
-    User *user = UserFind (client->userId);
+    User *user = (User *)EntityFind (client->userId);
     if (user != NULL) ServerBroadcastUserRecord (user);
 }
 
 void NetServerSetUserColor (u64 id, uint32_t color) {
-    User *user = UserFind (id);
+    if (EntityKindOf (id) != ENTITY_KIND_USER) return;
+    User *user = (User *)EntityFind (id);
     if (user == NULL) return;
     UserSetColor (id, color);
     ServerBroadcastUserRecord (user);
 }
 
 void NetServerSetUserCanScript (u64 id, bool canscript) {
-    User *user = UserFind (id);
+    if (EntityKindOf (id) != ENTITY_KIND_USER) return;
+    User *user = (User *)EntityFind (id);
     if (user == NULL) return;
     UserSetCanScript (id, canscript);
     ServerBroadcastUserRecord (user);
@@ -405,26 +299,46 @@ static void ServerBroadcastUserLeave (u64 userId) {
 
 static void ServerBroadcastLockState (u64 id, u64 ownerId) {
     Buffer frame = {0};
-    if (FrameLockState (&frame, id, ownerId))
+    if (FrameObjectUpsert (&frame, id, OBJECT_FIELD_LOCK_OWNER, NULL,
+                           0.0f, 0.0f, 0, 0, false, 0, NULL, 0, ownerId))
         ServerBroadcast (frame.data, frame.len);
     BufferFree (&frame);
 }
 
 static void ServerSendLockState (int clientIndex, u64 id, u64 ownerId) {
     Buffer frame = {0};
-    if (FrameLockState (&frame, id, ownerId))
+    if (FrameObjectUpsert (&frame, id, OBJECT_FIELD_LOCK_OWNER, NULL,
+                           0.0f, 0.0f, 0, 0, false, 0, NULL, 0, ownerId))
         ServerClientEnqueue (&serverClients[clientIndex], frame.data, frame.len);
     BufferFree (&frame);
+}
+
+static void ServerSendLockFailed (int clientIndex, u64 id) {
+    Buffer frame = {0};
+    if (FrameObjectLock (&frame, NET_LOCK_FAILED, id))
+        ServerClientEnqueue (&serverClients[clientIndex], frame.data, frame.len);
+    BufferFree (&frame);
+}
+
+static void ServerSendLockFailedToUser (u64 userId, u64 id) {
+    if (userId == 0) return;
+    for (int i = 0; i < NET_MAX_CLIENTS; i++) {
+        if (serverClients[i].joined && serverClients[i].active &&
+            serverClients[i].userId == userId)
+            ServerSendLockFailed (i, id);
+    }
 }
 
 static void ServerSendObjectState (int clientIndex, const Object *object) {
     if (serverSuppressObjectBroadcast) return;
     Buffer frame = {0};
     bool hidden = ObjectIsHiddenForUser (object, serverClients[clientIndex].userId);
-    if (FrameObjectUpsert (&frame, object->id, object->name, object->pos.x, object->pos.y,
+    if (FrameObjectUpsert (&frame, object->id, OBJECT_FIELD_ALL,
+                           object->name, object->pos.x, object->pos.y,
                            object->layer, object->timestamp, hidden,
-                           (uint32_t)object->assetIndex,
-                           object->assets.ids, (uint32_t)object->assets.count))
+                           (uint32_t)object->assetIndex, object->assets.ids,
+                           (uint32_t)object->assets.count,
+                           object->lockOwnerId))
         ServerClientEnqueue (&serverClients[clientIndex], frame.data, frame.len);
     BufferFree (&frame);
 }
@@ -433,6 +347,82 @@ static void ServerBroadcastObjectStateForAll (const Object *object) {
     for (int i = 0; i < NET_MAX_CLIENTS; i++) {
         if (serverClients[i].joined) ServerSendObjectState (i, object);
     }
+}
+
+static void ServerBroadcastAsset (const Asset *asset) {
+    RawFile file = AssetRawFile(asset);
+    Buffer frame = {0};
+    if (FrameAssetAdd (&frame, 0, 0, AssetId(asset), AssetName(asset),
+                        file.ext, file.data, (uint32_t)file.size))
+        ServerBroadcast (frame.data, frame.len);
+    BufferFree (&frame);
+}
+
+static void ServerSendAsset (int clientIndex, const Asset *asset) {
+    RawFile file = AssetRawFile(asset);
+    Buffer frame = {0};
+    if (FrameAssetAdd (&frame, 0, 0, AssetId(asset), AssetName(asset),
+                        file.ext, file.data, (uint32_t)file.size))
+        ServerClientEnqueue (&serverClients[clientIndex], frame.data, frame.len);
+    BufferFree (&frame);
+}
+
+static void ServerSendUser (int clientIndex, const User *user) {
+    Buffer frame = {0};
+    if (FrameUserState (&frame, user->id, user->name, user->color,
+                        user->canscript, user->hasCursor, user->x, user->y))
+        ServerClientEnqueue (&serverClients[clientIndex], frame.data, frame.len);
+    BufferFree (&frame);
+}
+
+static void ServerSendHeartbeat (int clientIndex) {
+    Buffer frame = {0};
+    if (FrameHeartbeat (&frame))
+        ServerClientEnqueue (&serverClients[clientIndex], frame.data, frame.len);
+    BufferFree (&frame);
+}
+
+static bool ServerSendWelcome (int clientIndex) {
+    Buffer payload = {0};
+    Buffer frame = {0};
+    bool ok = BufferPutU64 (&payload, serverClients[clientIndex].userId) &&
+              FrameMake (&frame, NET_HELLO, &payload);
+    if (ok)
+        ServerClientEnqueue (&serverClients[clientIndex], frame.data, frame.len);
+    BufferFree (&payload);
+    BufferFree (&frame);
+    return ok;
+}
+
+static void ServerSendJoinState (int clientIndex) {
+    if (!ServerSendWelcome (clientIndex)) {
+        serverClients[clientIndex].closing = true;
+        return;
+    }
+    ServerSendHeartbeat (clientIndex);
+
+    IdGroup assets = AssetIds ();
+    for (int i = 0; i < assets.count; i++) {
+        Asset *asset = EntityFind (assets.ids[i]);
+        if (asset != NULL) ServerSendAsset (clientIndex, asset);
+    }
+    IdGroupUnload (&assets);
+
+    IdGroup users = UserIds ();
+    for (int i = 0; i < users.count; i++) {
+        User *user = (User *)EntityFind (users.ids[i]);
+        if (user != NULL) ServerSendUser (clientIndex, user);
+    }
+    IdGroupUnload (&users);
+
+    IdGroup objects = ObjectIds ();
+    for (int i = 0; i < objects.count; i++) {
+        Object *object = EntityFind (objects.ids[i]);
+        if (object != NULL) ServerSendObjectState (clientIndex, object);
+    }
+    IdGroupUnload (&objects);
+
+    ServerSendAllMenus (clientIndex);
 }
 
 static void ServerRunObjectEvent (u64 id, const char *event, u64 userId);
@@ -448,6 +438,7 @@ static void ServerReleaseLocks (u64 userId, bool notify) {
         object = ServerObjectFind (ids.ids[i]);
         if (object != NULL && object->lockOwnerId == userId) {
             object->lockOwnerId = 0;
+            ServerSendLockFailedToUser (userId, object->id);
             ServerBroadcastLockState (object->id, 0);
         }
     }
@@ -466,12 +457,6 @@ static void ServerBeginDisconnect (ServerClient *client) {
 }
 
 static void ServerRejectClient (int clientIndex) {
-    Buffer payload = {0};
-    Buffer frame = {0};
-    if (FrameMake (&frame, NET_REJECT, &payload))
-        ServerClientEnqueue (&serverClients[clientIndex], frame.data, frame.len);
-    BufferFree (&frame);
-    BufferFree (&payload);
     serverClients[clientIndex].closing = true;
 }
 
@@ -484,11 +469,9 @@ static bool ServerUsernameTaken (const char *name, int excludeIndex) {
 }
 
 static bool ServerHandleHello (ServerClient *client, int clientIndex,
-                               const unsigned char *data, size_t length) {
-    Reader reader = {data, length, 0};
-    char name[128] = {0};
-    if (!ReaderString (&reader, name, sizeof (name)) || name[0] == '\0' ||
-        reader.pos != reader.len || ServerUsernameTaken (name, clientIndex)) {
+                               ServerPacket *packet) {
+    const char *name = packet->u.hello.username;
+    if (name[0] == '\0' || ServerUsernameTaken (name, clientIndex)) {
         ServerRejectClient (clientIndex);
         printf ("client rejected: %s\n", name[0] != '\0' ? name : "(invalid username)");
         fflush (stdout);
@@ -502,110 +485,102 @@ static bool ServerHandleHello (ServerClient *client, int clientIndex,
     }
     client->joined = true;
     snprintf (client->username, sizeof (client->username), "%s", name);
-    ServerSendSnapshot (clientIndex);
+    ServerSendJoinState (clientIndex);
     ServerBroadcastUserState (client);
     printf ("client joined: %s\n", client->username);
     fflush (stdout);
     return true;
 }
 
-static bool ServerApplyObjectCreate (Reader *reader, int clientIndex);
+static bool ServerCreateObject (int clientIndex, u64 requestId,
+                                const char *requested, float x, float y,
+                                uint32_t layer, const u64 *ids,
+                                uint32_t assetCount) {
+    for (uint32_t i = 0; i < assetCount; i++) {
+        if (ServerAssetFind (ids[i]) == NULL) return true;
+    }
+    u64 id = ServerNewEntityId ();
+    char name[256];
+    ServerMakeUniqueName (requested, name, sizeof (name), true, 0);
+    Object *object = ObjectAdd (name, (Vector2){x, y}, (int32_t)layer, 0, id);
+    if (object == NULL) return false;
+    if (!IdGroupCopy (ObjectAssets (object), ids, (int)assetCount)) {
+        ObjectDelete (object);
+        return false;
+    }
+    ObjectTouch (object);
+    for (int i = 0; i < NET_MAX_CLIENTS; i++) {
+        if (!serverClients[i].joined) continue;
+        Buffer frame = {0};
+        bool hidden = ObjectIsHiddenForUser (object, serverClients[i].userId);
+        if (!FrameObjectCreated (&frame, requestId,
+                                 serverClients[clientIndex].userId, id,
+                                 object->name, object->pos.x, object->pos.y,
+                                 object->layer, object->timestamp, hidden, 0,
+                                 object->assets.ids,
+                                 (uint32_t)object->assets.count)) {
+            BufferFree (&frame);
+            return false;
+        }
+        ServerClientEnqueue (&serverClients[i], frame.data, frame.len);
+        BufferFree (&frame);
+    }
+    ServerLockObject (clientIndex, id);
+    return true;
+}
 
-static bool ServerCreateAsset (Reader *reader, int clientIndex,
-                              u64 *requestIdOut, u64 *assetIdOut) {
-    u64 requestId;
-    char requested[256];
-    char ext[8];
-    uint32_t size;
-    if (!ReaderU64 (reader, &requestId) ||
-        !ReaderString (reader, requested, sizeof (requested)) ||
-        !ReaderString (reader, ext, sizeof (ext)) ||
-        !ReaderU32 (reader, &size) || size == 0 || size > NET_MAX_FRAME ||
-        !ReaderAvailable (reader, size)) return false;
-
+static bool ServerCreateAsset (const char *requested, const char *ext,
+                               const unsigned char *data, size_t size,
+                               u64 requestId, int clientIndex,
+                               u64 *assetIdOut) {
     u64 id = ServerNewEntityId ();
     char name[256];
     ServerMakeUniqueName (requested, name, sizeof (name), false, 0);
-
-    const unsigned char *data = reader->data + reader->pos;
-    reader->pos += size;
-    Asset *asset = AssetAddRaw (name, ext, data, (int)size, id);
-    if (asset == NULL) return false;
-
+    Asset *asset = AssetCreate (name, id);
+    RawFile input = {(unsigned char *)data, size, ""};
+    snprintf (input.ext, sizeof (input.ext), "%s", ext);
+    if (asset == NULL || !AssetLoad (asset, input)) {
+        if (asset != NULL) AssetDelete (asset);
+        return false;
+    }
+    RawFile stored = AssetRawFile(asset);
     Buffer frame = {0};
     if (!FrameAssetAdd (&frame, requestId, serverClients[clientIndex].userId,
-                        id, asset->name, asset->ext, asset->fileData,
-                        (uint32_t)asset->fileSize)) {
+                        id, AssetName(asset), stored.ext, stored.data,
+                        (uint32_t)stored.size)) {
         BufferFree (&frame);
         return false;
     }
     ServerBroadcast (frame.data, frame.len);
     BufferFree (&frame);
-    if (requestIdOut != NULL) *requestIdOut = requestId;
     if (assetIdOut != NULL) *assetIdOut = id;
     return true;
 }
 
-static bool ServerApplyAssetAdd (Reader *reader, int clientIndex) {
-    return ServerCreateAsset (reader, clientIndex, NULL, NULL);
-}
-
-static bool ServerApplyAssetObject (Reader *reader, int clientIndex) {
-    u64 requestId = 0;
+static bool ServerApplyAssetAdd (ServerPacket *packet, int clientIndex) {
+    ServerAssetAddPacket *p = &packet->u.assetAdd;
     u64 assetId = 0;
-    if (!ServerCreateAsset (reader, clientIndex, &requestId, &assetId))
+    if (!ServerCreateAsset (p->name, p->ext, p->data, p->size,
+                            p->requestId, clientIndex, &assetId))
         return false;
-
-    char objectName[256];
-    float x, y;
-    uint32_t layer;
-    u64 timestamp;
-    if (!ReaderString (reader, objectName, sizeof (objectName)) ||
-        !ReaderF32 (reader, &x) || !ReaderF32 (reader, &y) ||
-        !ReaderU32 (reader, &layer) || !ReaderU64 (reader, &timestamp) ||
-        reader->pos != reader->len) return false;
-
-    Buffer payload = {0};
-    Buffer frame = {0};
-    bool ok = BufferPutU64 (&payload, requestId) &&
-              BufferPutString (&payload, objectName) &&
-              BufferPutF32 (&payload, x) && BufferPutF32 (&payload, y) &&
-              BufferPutU32 (&payload, layer) &&
-              BufferPutU64 (&payload, timestamp) &&
-              BufferPutU32 (&payload, 1) && BufferPutU64 (&payload, assetId) &&
-              FrameMake (&frame, NET_REQ_OBJECT_CREATE, &payload);
-    BufferFree (&payload);
-    if (!ok) {
-        BufferFree (&frame);
-        return false;
-    }
-    Reader objectReader = {frame.data + 5, frame.len - 5, 0};
-    bool result = ServerApplyObjectCreate (&objectReader, clientIndex);
-    BufferFree (&frame);
-    return result;
+    if (!p->createObject) return true;
+    return ServerCreateObject (clientIndex, p->requestId, p->objectName,
+                               p->x, p->y, p->layer, &assetId, 1);
 }
 
-static bool ServerApplyObjectCreate (Reader *reader, int clientIndex);
-
-static bool ServerApplyAssetRename (Reader *reader, int clientIndex) {
-    u64 id;
-    char requested[256];
-    if (!ReaderU64 (reader, &id) || !ReaderString (reader, requested, sizeof (requested)))
-        return false;
-
-    Asset *asset = ServerAssetFind (id);
-    if (asset == NULL || requested[0] == '\0') {
-        ServerSendSnapshot (clientIndex);
-        return true;
-    }
-    if (strcmp (asset->name, requested) == 0) return true;
+static bool ServerApplyAssetRename (ServerPacket *packet) {
+    ServerAssetRenamePacket *p = &packet->u.assetRename;
+    if (p->name[0] == '\0') return true;
+    Asset *asset = ServerAssetFind (p->id);
+    if (asset == NULL) return true;
+    if (strcmp (AssetName(asset), p->name) == 0) return true;
 
     char name[256];
-    ServerMakeUniqueName (requested, name, sizeof (name), false, id);
+    ServerMakeUniqueName (p->name, name, sizeof (name), false, p->id);
     if (!AssetRename (asset, name)) return false;
 
     Buffer frame = {0};
-    if (!FrameAssetRename (&frame, id, asset->name)) {
+    if (!FrameAssetRename (&frame, p->id, AssetName(asset))) {
         BufferFree (&frame);
         return false;
     }
@@ -614,27 +589,19 @@ static bool ServerApplyAssetRename (Reader *reader, int clientIndex) {
     return true;
 }
 
-static bool ServerApplyAssetReplace (Reader *reader, int clientIndex) {
-    u64 id;
-    char ext[8];
-    uint32_t size;
-    if (!ReaderU64 (reader, &id) || !ReaderString (reader, ext, sizeof (ext)) ||
-        !ReaderU32 (reader, &size) || size == 0 || size > NET_MAX_FRAME ||
-        !ReaderAvailable (reader, size)) return false;
+static bool ServerApplyAssetReplace (ServerPacket *packet) {
+    ServerAssetReplacePacket *p = &packet->u.assetReplace;
+    Asset *asset = ServerAssetFind (p->id);
+    if (asset == NULL) return true;
 
-    Asset *asset = ServerAssetFind (id);
-    if (asset == NULL) {
-        ServerSendSnapshot (clientIndex);
-        return true;
-    }
+    RawFile input = {p->data, p->size, ""};
+    snprintf (input.ext, sizeof (input.ext), "%s", p->ext);
+    if (!AssetLoad (asset, input)) return false;
 
-    const unsigned char *data = reader->data + reader->pos;
-    reader->pos += size;
-    if (!AssetReplaceRaw (asset, ext, data, (int)size)) return false;
-
+    RawFile stored = AssetRawFile(asset);
     Buffer frame = {0};
-    if (!FrameAssetReplace (&frame, id, asset->ext, asset->fileData,
-                            (uint32_t)asset->fileSize)) {
+    if (!FrameAssetReplace (&frame, p->id, stored.ext, stored.data,
+                            (uint32_t)stored.size)) {
         BufferFree (&frame);
         return false;
     }
@@ -657,18 +624,14 @@ static int ServerAssetReferenceCount (u64 id) {
     return count;
 }
 
-static bool ServerApplyAssetDelete (Reader *reader, int clientIndex) {
-    u64 id;
-    if (!ReaderU64 (reader, &id)) return false;
-
+static bool ServerApplyAssetDelete (ServerPacket *packet, int clientIndex) {
+    u64 id = packet->u.id.id;
     Asset *asset = ServerAssetFind (id);
     if (asset == NULL) return true;
 
     if (ServerAssetReferenceCount (id) > 0) {
-        Buffer failed = {0};
-        if (FrameAssetDeleteFailed (&failed, id))
-            ServerClientEnqueue (&serverClients[clientIndex], failed.data, failed.len);
-        BufferFree (&failed);
+        NetServerSendError (serverClients[clientIndex].userId,
+                            "素材正在被物件使用，无法删除");
         return true;
     }
 
@@ -683,153 +646,47 @@ static bool ServerApplyAssetDelete (Reader *reader, int clientIndex) {
     return true;
 }
 
-static bool ServerApplyObjectCreate (Reader *reader, int clientIndex) {
-    u64 requestId;
-    char requested[256];
-    float x, y;
-    uint32_t layer;
-    u64 timestamp;
-    uint32_t assetCount;
-    if (!ReaderU64 (reader, &requestId) ||
-        !ReaderString (reader, requested, sizeof (requested)) ||
-        !ReaderF32 (reader, &x) || !ReaderF32 (reader, &y) ||
-        !ReaderU32 (reader, &layer) || !ReaderU64 (reader, &timestamp) ||
-        !ReaderU32 (reader, &assetCount) || assetCount > 100000 ||
-        !ReaderAvailable (reader, (size_t)assetCount * 8)) return false;
-
-    u64 *ids = NULL;
-    if (assetCount > 0) {
-        ids = malloc ((size_t)assetCount * sizeof (u64));
-        if (ids == NULL) return false;
-        for (uint32_t i = 0; i < assetCount; i++) {
-            if (!ReaderU64 (reader, &ids[i]) || ServerAssetFind (ids[i]) == NULL) {
-                free (ids);
-                ServerSendSnapshot (clientIndex);
-                return true;
-            }
-        }
-    }
-
-    u64 id = ServerNewEntityId ();
-    char name[256];
-    ServerMakeUniqueName (requested, name, sizeof (name), true, 0);
-
-    Object *object = ObjectAdd (name, (Vector2){x, y}, (int32_t)layer, timestamp, id);
-    if (object == NULL) {
-        free (ids);
-        return false;
-    }
-    if (!IdGroupCopy (ObjectAssets (object), ids, (int)assetCount)) {
-        ObjectDelete (object);
-        free (ids);
-        return false;
-    }
-    free (ids);
-    ObjectTouch (object);
-
-    for (int i = 0; i < NET_MAX_CLIENTS; i++) {
-        if (!serverClients[i].joined) continue;
-        Buffer frame = {0};
-        bool hidden = ObjectIsHiddenForUser (object, serverClients[i].userId);
-        if (!FrameObjectCreated (&frame, requestId, serverClients[clientIndex].userId,
-                                 id, object->name, object->pos.x, object->pos.y,
-                                 object->layer, object->timestamp, hidden, 0,
-                                 object->assets.ids, (uint32_t)object->assets.count)) {
-            BufferFree (&frame);
-            return false;
-        }
-        ServerClientEnqueue (&serverClients[i], frame.data, frame.len);
-        BufferFree (&frame);
-    }
-    ServerLockObject (clientIndex, id);
-    return true;
+static bool ServerApplyObjectCreate (ServerPacket *packet, int clientIndex) {
+    ServerObjectCreatePacket *p = &packet->u.objectCreate;
+    return ServerCreateObject (clientIndex, p->requestId, p->name,
+                               p->x, p->y, p->layer,
+                               p->assetIds, p->assetCount);
 }
 
-static bool ServerApplyObjectUpsert (Reader *reader, int clientIndex) {
-    u64 id;
-    char requested[256];
-    float x, y;
-    uint32_t layer;
-    u64 timestamp;
-    uint8_t hidden;
-    uint32_t assetIndex;
-    uint32_t assetCount;
-    if (!ReaderU64 (reader, &id) || !ReaderString (reader, requested, sizeof (requested)) ||
-        !ReaderF32 (reader, &x) || !ReaderF32 (reader, &y) ||
-        !ReaderU32 (reader, &layer) || !ReaderU64 (reader, &timestamp) ||
-        !ReaderBytes (reader, &hidden, 1) ||
-        !ReaderU32 (reader, &assetCount) || !ReaderU32 (reader, &assetIndex) ||
-        id == 0 ||
-        assetCount > 100000 || !ReaderAvailable (reader, (size_t)assetCount * 8))
-        return false;
-    (void)hidden;
-
-    Object *object = ServerObjectFind (id);
-    if (object == NULL) {
-        if (ServerObjectIdDeleted (id)) return true;
-        ServerSendSnapshot (clientIndex);
-        return true;
-    }
+static bool ServerApplyObjectUpsert (ServerPacket *packet, int clientIndex) {
+    ServerObjectUpsertPacket *p = &packet->u.objectUpsert;
+    const uint32_t required = OBJECT_FIELD_NAME | OBJECT_FIELD_POSITION |
+                              OBJECT_FIELD_LAYER | OBJECT_FIELD_ASSETS |
+                              OBJECT_FIELD_ASSET_INDEX;
+    if ((p->fields & required) != required || p->name == NULL) return true;
+    Object *object = ServerObjectFind (p->id);
+    if (object == NULL) return true;
     if (object->lockOwnerId == 0 ||
         object->lockOwnerId != serverClients[clientIndex].userId) {
         ServerSendObjectState (clientIndex, object);
         ServerSendLockState (clientIndex, object->id, object->lockOwnerId);
         return true;
     }
-
-    u64 *ids = NULL;
-    if (assetCount > 0) {
-        ids = malloc ((size_t)assetCount * sizeof (u64));
-        if (ids == NULL) return false;
-        for (uint32_t i = 0; i < assetCount; i++) {
-            if (!ReaderU64 (reader, &ids[i]) || ServerAssetFind (ids[i]) == NULL) {
-                free (ids);
-                ServerSendSnapshot (clientIndex);
-                return true;
-            }
-        }
+    for (uint32_t i = 0; i < p->assetCount; i++) {
+        if (ServerAssetFind (p->assetIds[i]) == NULL) return true;
     }
-
     char name[256];
-    ServerMakeUniqueName (requested, name, sizeof (name), true, id);
-
+    ServerMakeUniqueName (p->name, name, sizeof (name), true, p->id);
     if (!ObjectRename (object, name) ||
-        !IdGroupCopy (ObjectAssets (object), ids, (int)assetCount)) {
-        free (ids);
+        !IdGroupCopy (ObjectAssets (object), p->assetIds,
+                      (int)p->assetCount))
         return false;
-    }
-    free (ids);
-    object->pos = (Vector2){x, y};
-    object->layer = (int32_t)layer;
-    object->assetIndex = assetIndex < (uint32_t)object->assets.count
-                             ? (int)assetIndex : 0;
-    // 时间戳只增不减，避免置顶广播后到达的旧更新把物件压回去。
-    if (timestamp > object->timestamp) object->timestamp = timestamp;
-
-    ServerBroadcastObjectStateForAll (object);
-    return true;
-}
-
-static bool ServerApplyObjectFront (Reader *reader, int clientIndex) {
-    u64 id;
-    if (!ReaderU64 (reader, &id)) return false;
-
-    Object *object = ServerObjectFind (id);
-    if (object == NULL) return true;
-    if (object->lockOwnerId != serverClients[clientIndex].userId) {
-        ServerSendObjectState (clientIndex, object);
-        ServerSendLockState (clientIndex, id, object->lockOwnerId);
-        return true;
-    }
-
+    object->pos = (Vector2){p->x, p->y};
+    object->layer = (int32_t)p->layer;
+    object->assetIndex = p->assetIndex < (uint32_t)object->assets.count
+                             ? (int)p->assetIndex : 0;
     ObjectTouch (object);
     ServerBroadcastObjectStateForAll (object);
     return true;
 }
 
-static bool ServerApplyDragEnd (Reader *reader, int clientIndex) {
-    u64 id;
-    if (!ReaderU64 (reader, &id) || reader->pos != reader->len) return false;
+static bool ServerApplyDragEnd (ServerPacket *packet, int clientIndex) {
+    u64 id = packet->u.id.id;
     Object *object = ServerObjectFind (id);
     if (object == NULL) return true;
     u64 userId = serverClients[clientIndex].userId;
@@ -838,11 +695,10 @@ static bool ServerApplyDragEnd (Reader *reader, int clientIndex) {
     return true;
 }
 
-static bool ServerApplyDragUpdate (Reader *reader, int clientIndex) {
-    u64 id;
-    float dx, dy;
-    if (!ReaderU64 (reader, &id) || !ReaderF32 (reader, &dx) ||
-        !ReaderF32 (reader, &dy) || reader->pos != reader->len) return false;
+static bool ServerApplyDragUpdate (ServerPacket *packet, int clientIndex) {
+    u64 id = packet->u.drag.id;
+    float dx = packet->u.drag.dx;
+    float dy = packet->u.drag.dy;
     Object *object = ServerObjectFind (id);
     if (object == NULL) return true;
     u64 userId = serverClients[clientIndex].userId;
@@ -851,7 +707,7 @@ static bool ServerApplyDragUpdate (Reader *reader, int clientIndex) {
     Vector2 moved = {object->pos.x + dx, object->pos.y + dy};
     object->pos = moved;
     ObjectTouch (object);
-    // 脚本可能再次移动 self；拖动期间暂不广播中间状态，最后统一广播。
+
     serverSuppressObjectBroadcast = true;
     ServerRunObjectEvent (id, "ondrag", userId);
     serverSuppressObjectBroadcast = false;
@@ -869,10 +725,8 @@ static bool ServerApplyDragUpdate (Reader *reader, int clientIndex) {
     return true;
 }
 
-static bool ServerApplyObjectDelete (Reader *reader, int clientIndex) {
-    u64 id;
-    if (!ReaderU64 (reader, &id)) return false;
-
+static bool ServerApplyObjectDelete (ServerPacket *packet, int clientIndex) {
+    u64 id = packet->u.id.id;
     Object *object = ServerObjectFind (id);
     if (object == NULL) return true;
     if (object->lockOwnerId == 0 ||
@@ -882,7 +736,6 @@ static bool ServerApplyObjectDelete (Reader *reader, int clientIndex) {
         return true;
     }
     if (!ObjectDelete (object)) return false;
-    if (!ServerTombstoneObject (id)) return false;
 
     Buffer frame = {0};
     if (!FrameObjectDelete (&frame, id)) {
@@ -894,9 +747,9 @@ static bool ServerApplyObjectDelete (Reader *reader, int clientIndex) {
     return true;
 }
 
-static bool ServerApplyCursor (Reader *reader, int clientIndex) {
-    float x, y;
-    if (!ReaderF32 (reader, &x) || !ReaderF32 (reader, &y)) return false;
+static bool ServerApplyCursor (ServerPacket *packet, int clientIndex) {
+    float x = packet->u.cursor.x;
+    float y = packet->u.cursor.y;
     ServerClient *client = &serverClients[clientIndex];
     UserSetCursor (client->userId, true, x, y);
 
@@ -907,6 +760,7 @@ static bool ServerApplyCursor (Reader *reader, int clientIndex) {
     }
     ServerBroadcast (frame.data, frame.len);
     BufferFree (&frame);
+    ServerSendHeartbeat (clientIndex);
     return true;
 }
 
@@ -922,11 +776,14 @@ static void ServerRunObjectEvent (u64 id, const char *event, u64 userId) {
 
 static void ServerLockObject (int clientIndex, u64 id) {
     Object *object = ServerObjectFind (id);
-    if (object == NULL) return;
+    if (object == NULL) {
+        ServerSendLockFailed (clientIndex, id);
+        return;
+    }
 
     u64 userId = serverClients[clientIndex].userId;
     if (object->lockOwnerId != 0 && object->lockOwnerId != userId) {
-        ServerSendLockState (clientIndex, id, object->lockOwnerId);
+        ServerSendLockFailed (clientIndex, id);
         return;
     }
     if (object->lockOwnerId == userId && userId != 0) {
@@ -938,33 +795,25 @@ static void ServerLockObject (int clientIndex, u64 id) {
     object = ServerObjectFind (id);
     if (object == NULL) return;
     object->lockOwnerId = userId;
-    pendingLockClient = clientIndex;
-    pendingLockObjectId = id;
-    pendingLockFailureSent = false;
     ServerRunObjectEvent (id, "ontouch", userId);
-    bool failureSent = pendingLockFailureSent;
-    pendingLockClient = -1;
-    pendingLockObjectId = 0;
-    pendingLockFailureSent = false;
 
     Object *current = ServerObjectFind (id);
-    if (current != NULL && current->lockOwnerId == userId) {
-        ServerBroadcastLockState (id, userId);
-    } else if (!failureSent) {
-        Buffer frame = {0};
-        if (FrameObjectLock (&frame, NET_LOCK_FAILED, id))
-            ServerClientEnqueue (&serverClients[clientIndex], frame.data, frame.len);
-        BufferFree (&frame);
+    if (current != NULL) {
+        if (current->lockOwnerId == userId)
+            ServerBroadcastLockState (id, userId);
+        else
+            ServerSendLockFailed (clientIndex, id);
     }
 }
 
-static bool ServerApplyLock (Reader *reader, int clientIndex, bool unlock,
-                             bool notify) {
-    u64 id;
-    if (!ReaderU64 (reader, &id)) return false;
-
+static bool ServerApplyLock (ServerPacket *packet, int clientIndex,
+                             bool unlock, bool notify) {
+    u64 id = packet->u.id.id;
     Object *object = ServerObjectFind (id);
-    if (object == NULL) return true;
+    if (object == NULL) {
+        if (!unlock) ServerSendLockFailed (clientIndex, id);
+        return true;
+    }
 
     u64 userId = serverClients[clientIndex].userId;
 
@@ -984,20 +833,16 @@ static bool ServerApplyLock (Reader *reader, int clientIndex, bool unlock,
     return true;
 }
 
-static bool ServerApplyScript (Reader *reader, int clientIndex) {
-    User *user = UserFind (serverClients[clientIndex].userId);
+static bool ServerApplyScript (ServerPacket *packet, int clientIndex) {
+    User *user = (User *)EntityFind (serverClients[clientIndex].userId);
     if (user != NULL && !user->canscript) {
         NetServerSendError (serverClients[clientIndex].userId,
                             "当前用户不允许提交脚本");
         return true;
     }
 
-    char source[65536];
-    char selfExpr[768];
-    if (!ReaderString (reader, source, sizeof (source)) ||
-        !ReaderString (reader, selfExpr, sizeof (selfExpr)) ||
-        reader->pos != reader->len)
-        return false;
+    const char *source = packet->u.script.source;
+    const char *selfExpr = packet->u.script.selfExpr;
     if (serverScriptEnv == NULL) {
         NetServerSendError (serverClients[clientIndex].userId, "脚本环境不可用");
         return true;
@@ -1065,19 +910,16 @@ static bool ServerApplyScript (Reader *reader, int clientIndex) {
     return true;
 }
 
-static bool ServerApplyMenu (Reader *reader, int clientIndex) {
-    u64 id;
-    uint32_t rawIndex;
-    char name[256];
-    if (!ReaderU64 (reader, &id) || !ReaderU32 (reader, &rawIndex) ||
-        !ReaderString (reader, name, sizeof (name)) || reader->pos != reader->len)
-        return false;
+static bool ServerApplyMenu (ServerPacket *packet, int clientIndex) {
+    u64 id = packet->u.menu.id;
+    uint32_t rawIndex = packet->u.menu.index;
+    const char *name = packet->u.menu.name;
     if (rawIndex > (uint32_t)INT_MAX) {
         NetServerSendError (serverClients[clientIndex].userId, "菜单项不存在");
         return true;
     }
 
-    if (id != 0 && UserFind (id) != NULL &&
+    if (id != 0 && EntityKindOf (id) == ENTITY_KIND_USER &&
         id != serverClients[clientIndex].userId) {
         NetServerSendError (serverClients[clientIndex].userId,
                             "无权执行其他用户的菜单");
@@ -1109,6 +951,13 @@ static bool ServerApplyMenu (Reader *reader, int clientIndex) {
     TextBufferFree (&error);
     free (result);
     return true;
+}
+
+static bool IdGroupHas (const IdGroup *group, u64 id) {
+    for (int i = 0; i < group->count; i++) {
+        if (group->ids[i] == id) return true;
+    }
+    return false;
 }
 
 static u64 ServerImportAllocateId (void *context) {
@@ -1163,15 +1012,13 @@ static bool ServerMergeImportData (const unsigned char *data, size_t size,
     return ok;
 }
 
-static bool ServerApplyImport (Reader *reader, int clientIndex) {
-    uint32_t size = 0;
-    if (!ReaderU32 (reader, &size) || size == 0 ||
-        !ReaderAvailable (reader, size)) return false;
-    const unsigned char *data = reader->data + reader->pos;
-    reader->pos += size;
-    if (reader->pos != reader->len) return false;
-
+static bool ServerApplyImport (ServerPacket *packet, int clientIndex) {
+    size_t size = packet->u.import.size;
+    const unsigned char *data = packet->u.import.data;
     u64 userId = serverClients[clientIndex].userId;
+    IdGroup beforeAssets = AssetIds ();
+    IdGroup beforeObjects = ObjectIds ();
+    int beforeMenuCount = MenuCount (0);
     TextBuffer conflicts = {0};
     bool ok = ServerMergeImportData (data, size, serverScriptEnv, &conflicts);
     if (!ok) {
@@ -1185,16 +1032,36 @@ static bool ServerApplyImport (Reader *reader, int clientIndex) {
         NetServerSendInfo (userId, "增量导入完成");
     }
 
-    for (int i = 0; i < NET_MAX_CLIENTS; i++) {
-        if (serverClients[i].joined) ServerSendSnapshot (i);
+    if (ok) {
+        IdGroup assets = AssetIds ();
+        for (int i = 0; i < assets.count; i++) {
+            if (!IdGroupHas (&beforeAssets, assets.ids[i])) {
+                Asset *asset = EntityFind (assets.ids[i]);
+                if (asset != NULL) ServerBroadcastAsset (asset);
+            }
+        }
+        IdGroupUnload (&assets);
+
+        IdGroup objects = ObjectIds ();
+        for (int i = 0; i < objects.count; i++) {
+            if (!IdGroupHas (&beforeObjects, objects.ids[i])) {
+                Object *object = EntityFind (objects.ids[i]);
+                if (object != NULL) ServerBroadcastObjectStateForAll (object);
+            }
+        }
+        IdGroupUnload (&objects);
+
+        if (MenuCount (0) != beforeMenuCount) NetServerBroadcastMenu (0);
     }
+    IdGroupUnload (&beforeAssets);
+    IdGroupUnload (&beforeObjects);
     TextBufferFree (&conflicts);
     return true;
 }
 
 
 static bool ServerImportAllowed (int clientIndex) {
-    User *user = UserFind (serverClients[clientIndex].userId);
+    User *user = (User *)EntityFind (serverClients[clientIndex].userId);
     if (user != NULL && !user->canscript) {
         NetServerSendError (serverClients[clientIndex].userId,
                             "当前用户不允许导入");
@@ -1204,74 +1071,45 @@ static bool ServerImportAllowed (int clientIndex) {
 }
 
 
-static bool ServerApplyFrame (uint8_t type, const unsigned char *data, size_t length,
-                              int clientIndex) {
-    Reader reader = {data, length, 0};
-    bool ok = false;
-
-    switch (type) {
+static bool ServerApplyFrame (ServerPacket *packet, int clientIndex) {
+    switch (packet->type) {
         case NET_REQ_ASSET_ADD:
-            if (!ServerImportAllowed (clientIndex)) { ok = true; break; }
-            ok = ServerApplyAssetAdd (&reader, clientIndex);
-            break;
-        case NET_REQ_ASSET_OBJECT:
-            if (!ServerImportAllowed (clientIndex)) { ok = true; break; }
-            ok = ServerApplyAssetObject (&reader, clientIndex);
-            break;
+            if (!ServerImportAllowed (clientIndex)) return true;
+            return ServerApplyAssetAdd (packet, clientIndex);
         case NET_ASSET_RENAME:
-            ok = ServerApplyAssetRename (&reader, clientIndex);
-            break;
+            return ServerApplyAssetRename (packet);
         case NET_ASSET_REPLACE:
-            ok = ServerApplyAssetReplace (&reader, clientIndex);
-            break;
+            return ServerApplyAssetReplace (packet);
         case NET_ASSET_DELETE:
-            ok = ServerApplyAssetDelete (&reader, clientIndex);
-            break;
+            return ServerApplyAssetDelete (packet, clientIndex);
         case NET_REQ_OBJECT_CREATE:
-            ok = ServerApplyObjectCreate (&reader, clientIndex);
-            break;
+            return ServerApplyObjectCreate (packet, clientIndex);
         case NET_OBJECT_UPSERT:
-            ok = ServerApplyObjectUpsert (&reader, clientIndex);
-            break;
-        case NET_REQ_OBJECT_FRONT:
-            ok = ServerApplyObjectFront (&reader, clientIndex);
-            break;
+            return ServerApplyObjectUpsert (packet, clientIndex);
         case NET_REQ_SCRIPT:
-            ok = ServerApplyScript (&reader, clientIndex);
-            break;
+            return ServerApplyScript (packet, clientIndex);
         case NET_REQ_MENU:
-            ok = ServerApplyMenu (&reader, clientIndex);
-            break;
+            return ServerApplyMenu (packet, clientIndex);
         case NET_REQ_IMPORT:
-            if (!ServerImportAllowed (clientIndex)) { ok = true; break; }
-            ok = ServerApplyImport (&reader, clientIndex);
-            break;
+            if (!ServerImportAllowed (clientIndex)) return true;
+            return ServerApplyImport (packet, clientIndex);
         case NET_DRAG_UPDATE:
-            ok = ServerApplyDragUpdate (&reader, clientIndex);
-            break;
+            return ServerApplyDragUpdate (packet, clientIndex);
         case NET_DRAG_END:
-            ok = ServerApplyDragEnd (&reader, clientIndex);
-            break;
+            return ServerApplyDragEnd (packet, clientIndex);
         case NET_OBJECT_DELETE:
-            ok = ServerApplyObjectDelete (&reader, clientIndex);
-            break;
+            return ServerApplyObjectDelete (packet, clientIndex);
         case NET_CURSOR:
-            ok = ServerApplyCursor (&reader, clientIndex);
-            break;
+            return ServerApplyCursor (packet, clientIndex);
         case NET_LOCK:
-            ok = ServerApplyLock (&reader, clientIndex, false, false);
-            break;
+            return ServerApplyLock (packet, clientIndex, false, false);
         case NET_UNLOCK:
-            ok = ServerApplyLock (&reader, clientIndex, true, false);
-            break;
+            return ServerApplyLock (packet, clientIndex, true, false);
         case NET_UNLOCK_NOTIFY:
-            ok = ServerApplyLock (&reader, clientIndex, true, true);
-            break;
+            return ServerApplyLock (packet, clientIndex, true, true);
         default:
             return false;
     }
-
-    return ok;
 }
 
 static void ServerReadFrames (ServerClient *client, int clientIndex) {
@@ -1289,7 +1127,7 @@ static void ServerReadFrames (ServerClient *client, int clientIndex) {
         size_t frameSize = 4 + (size_t)payloadSize;
         if (client->in.len - offset < frameSize) break;
 
-        uint8_t type = data[4];
+        enum NetPacketType type = (enum NetPacketType)data[4];
         const unsigned char *payload = data + 5;
         size_t payloadLength = (size_t)payloadSize - 1;
 
@@ -1326,19 +1164,25 @@ static void ServerProcessRequests (void) {
         if (request->type == SERVER_EVENT_DISCONNECT) {
             ServerBeginDisconnect (client);
         } else if (!client->active || client->closing) {
-            /* The connection was already rejected or closed. */
+
         } else if (request->type == NET_HELLO) {
-            if (client->joined) {
+            ServerPacket packet = ServerPacketParse (
+                request->type, request->payload, request->length);
+            if (client->joined || packet.type == NET_NONE) {
                 ServerBeginDisconnect (client);
-            } else if (!ServerHandleHello (client, request->clientIndex,
-                                           request->payload, request->length)) {
+            } else if (!ServerHandleHello (client, request->clientIndex, &packet)) {
                 ServerBeginDisconnect (client);
             }
+            ServerPacketFree (&packet);
         } else if (!client->joined) {
             ServerBeginDisconnect (client);
-        } else if (!ServerApplyFrame (request->type, request->payload,
-                                      request->length, request->clientIndex)) {
-            ServerBeginDisconnect (client);
+        } else {
+            ServerPacket packet = ServerPacketParse (
+                request->type, request->payload, request->length);
+            if (packet.type == NET_NONE ||
+                !ServerApplyFrame (&packet, request->clientIndex))
+                ServerBeginDisconnect (client);
+            ServerPacketFree (&packet);
         }
 
         free (request->payload);
@@ -1450,7 +1294,7 @@ int NetRunServer (int port, const char *bindAddress,
 }
 
 
-static void ServerSendMessageType (u64 target, const char *message, uint8_t type) {
+static void ServerSendMessageType (u64 target, const char *message, enum NetPacketType type) {
     if (message == NULL || message[0] == '\0') return;
 
     char text[NET_MAX_MESSAGE + 1];
@@ -1494,7 +1338,7 @@ void NetServerBroadcastMenu (u64 id) {
         BufferFree (&frame);
         return;
     }
-    if (id != 0 && UserFind (id) != NULL) {
+    if (id != 0 && EntityKindOf (id) == ENTITY_KIND_USER) {
         for (int i = 0; i < NET_MAX_CLIENTS; i++) {
             if (serverClients[i].joined && serverClients[i].userId == id)
                 ServerClientEnqueue (&serverClients[i], frame.data, frame.len);
@@ -1510,18 +1354,8 @@ void NetServerReleaseObjectLock (u64 id) {
     if (object == NULL || object->lockOwnerId == 0) return;
     u64 ownerId = object->lockOwnerId;
     object->lockOwnerId = 0;
+    ServerSendLockFailedToUser (ownerId, id);
     ServerBroadcastLockState (id, 0);
-
-    for (int i = 0; i < NET_MAX_CLIENTS; i++) {
-        if (serverClients[i].joined && serverClients[i].userId == ownerId) {
-            Buffer frame = {0};
-            if (FrameObjectLock (&frame, NET_LOCK_FAILED, id))
-                ServerClientEnqueue (&serverClients[i], frame.data, frame.len);
-            BufferFree (&frame);
-            break;
-        }
-    }
-    if (id == pendingLockObjectId) pendingLockFailureSent = true;
 }
 
 bool NetServerDeleteObject (u64 id) {
@@ -1530,7 +1364,6 @@ bool NetServerDeleteObject (u64 id) {
     if (object->lockOwnerId != 0) NetServerReleaseObjectLock (id);
 
     if (!ObjectDelete (object)) return false;
-    if (!ServerTombstoneObject (id)) return false;
 
     Buffer frame = {0};
     if (!FrameObjectDelete (&frame, id)) {
@@ -1546,5 +1379,3 @@ void NetServerBroadcastObjectState (const Object *object) {
     if (object == NULL) return;
     ServerBroadcastObjectStateForAll (object);
 }
-
-

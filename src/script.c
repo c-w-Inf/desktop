@@ -214,7 +214,7 @@ static bool LexerReadHex4 (Lexer* lexer, uint32_t* value) {
 
 static char* LexerReadString (Lexer* lexer, int line) {
     TextBuffer buffer = {0};
-    LexerAdvance (lexer);  // opening quote
+    LexerAdvance (lexer);
 
     while (lexer->pos < lexer->length) {
         char ch = LexerPeek (lexer, 0);
@@ -1179,7 +1179,7 @@ static Expr* ParseObject (Parser* parser, int line) {
 }
 
 static bool ParseCallTail (Parser* parser, Expr* call, int line) {
-    ParserNext (parser);  // (
+    ParserNext (parser);
 
     if (!ParserCheck (parser, TOK_RPAREN)) {
         while (!parser->failed) {
@@ -1259,7 +1259,7 @@ static Expr* ParsePostfix (Parser* parser) {
             expr = ParseCallExpression (parser, expr, line);
             continue;
         }
-        ParserNext (parser);  // #
+        ParserNext (parser);
 
         Expr* key = NULL;
         if (ParserCheck (parser, TOK_STRING)) {
@@ -1473,7 +1473,7 @@ static bool ProgramAddStatement (Program* program, Stmt* stmt) {
 }
 
 static Stmt* ParseVar (Parser* parser, bool isGlobal, int line) {
-    ParserNext (parser);  // var
+    ParserNext (parser);
     if (!ParserCheck (parser, TOK_IDENT)) {
         SetError (&parser->error, parser->lexer.token.line, "var 后面需要变量名");
         parser->failed = true;
@@ -1634,7 +1634,7 @@ static Stmt* ParseStatement (Parser* parser, bool topLevel) {
         }
         Expr* target = expr;
         TokenType op = parser->lexer.token.type;
-        ParserNext (parser);  // =, +=, -=, ...
+        ParserNext (parser);
         Expr* value = ParseExpression (parser);
         if (value == NULL) {
             ExprFree (target);
@@ -1949,7 +1949,7 @@ static size_t StripIndentWidth (const char *source, size_t start, size_t end,
 
 static Stmt* ParseFunctionDefinition (Parser* parser) {
     int line = parser->lexer.token.line;
-    ParserNext (parser);  // func
+    ParserNext (parser);
 
     if (!ParserCheck (parser, TOK_IDENT)) {
         SetError (&parser->error, parser->lexer.token.line, "func 后面需要函数名");
@@ -2428,49 +2428,6 @@ static char *ScriptEnvLocalToJson (ScriptEnv* env) {
     return result;
 }
 
-static bool FileWriteBytes (FILE *file, const void *data, size_t size) {
-    if (size == 0) return true;
-    return data != NULL && fwrite (data, 1, size, file) == size;
-}
-
-static bool FileWriteU8 (FILE *file, uint8_t value) {
-    return FileWriteBytes (file, &value, sizeof (value));
-}
-
-static bool FileWriteU32 (FILE *file, uint32_t value) {
-    unsigned char bytes[4] = {
-        (unsigned char)(value & 0xffu),
-        (unsigned char)((value >> 8) & 0xffu),
-        (unsigned char)((value >> 16) & 0xffu),
-        (unsigned char)((value >> 24) & 0xffu)
-    };
-    return FileWriteBytes (file, bytes, sizeof (bytes));
-}
-
-static bool FileWriteString (FILE *file, const char *text) {
-    size_t length = strlen (text);
-    if (length > UINT32_MAX) return false;
-    return FileWriteU32 (file, (uint32_t)length) &&
-           FileWriteBytes (file, text, length);
-}
-
-bool ScriptEnvWrite (FILE *file, ScriptEnv *globalEnv, u64 id, uint8_t ownerKind,
-                     const char *ownerName, bool *written) {
-    *written = false;
-    ScriptEnv *env = id == 0 ? globalEnv : EntityGetData (id);
-    if (env == NULL) return true;
-
-    char *json = ScriptEnvLocalToJson (env);
-    if (json == NULL) return false;
-    bool ok = FileWriteU8 (file, ownerKind) &&
-              FileWriteString (file, ownerName) &&
-              FileWriteString (file, json);
-    free (json);
-    if (!ok) return false;
-    *written = true;
-    return true;
-}
-
 char *ScriptEnvJson (ScriptEnv *globalEnv, u64 id) {
     Env *env = id == 0 ? globalEnv : EntityGetData (id);
     return env != NULL ? ScriptEnvLocalToJson (env) : NULL;
@@ -2704,7 +2661,7 @@ static struct json_object *ObjectCall (Runtime *runtime, int line,
     }
 
     const char *name = json_object_get_string (args[0]);
-    Object *object = ObjectFindByName (name);
+    Object *object = ObjectFind (name);
     if (object == NULL) {
         RuntimeFail (runtime, line, "物件 %s 不存在", name);
         return NULL;
@@ -2729,7 +2686,7 @@ static struct json_object *UserCall (Runtime *runtime, int line,
     u64 id = 0;
     IdGroup ids = UserIds ();
     for (int i = 0; i < ids.count; i++) {
-        User *user = UserFind (ids.ids[i]);
+        User *user = (User *)EntityFind (ids.ids[i]);
         if (user != NULL && strcmp (user->name, name) == 0) {
             id = user->id;
             break;
@@ -2746,16 +2703,14 @@ static struct json_object *UserCall (Runtime *runtime, int line,
     return result;
 }
 
-static Object *FindObjectById (u64 id) {
-    return ObjectFindById (id);
-}
-
 static const char *SelfTypeName (u64 self) {
     if (self == 0) return "global";
-    if (FindObjectById (self) != NULL) return "object";
-    if (UserFind (self) != NULL) return "user";
-    if (AssetFindById (self) != NULL) return "asset";
-    return NULL;
+    switch (EntityKindOf (self)) {
+    case ENTITY_KIND_OBJECT: return "object";
+    case ENTITY_KIND_USER: return "user";
+    case ENTITY_KIND_ASSET: return "asset";
+    default: return NULL;
+    }
 }
 
 static struct json_object *FlipCall (Runtime *runtime, int line, u64 self,
@@ -2770,7 +2725,8 @@ static struct json_object *FlipCall (Runtime *runtime, int line, u64 self,
     }
 
     u64 target = self != 0 ? self : runtime->self;
-    Object *object = FindObjectById (target);
+    Object *object = EntityKindOf (target) == ENTITY_KIND_OBJECT ?
+                       (Object *)EntityFind (target) : NULL;
     if (object == NULL) {
         RuntimeFail (runtime, line, "self 不是物件");
         return NULL;
@@ -2823,7 +2779,8 @@ static struct json_object *MoveCall (Runtime *runtime, int line, u64 self,
     }
 
     u64 target = self != 0 ? self : runtime->self;
-    Object *object = FindObjectById (target);
+    Object *object = EntityKindOf (target) == ENTITY_KIND_OBJECT ?
+                       (Object *)EntityFind (target) : NULL;
     if (object == NULL) {
         RuntimeFail (runtime, line, "self 不是物件");
         return NULL;
@@ -2842,7 +2799,8 @@ static struct json_object *PosCall (Runtime *runtime, int line, u64 self,
     }
 
     u64 target = self != 0 ? self : runtime->self;
-    Object *object = FindObjectById (target);
+    Object *object = EntityKindOf (target) == ENTITY_KIND_OBJECT ?
+                       (Object *)EntityFind (target) : NULL;
     if (object == NULL) {
         RuntimeFail (runtime, line, "self 不是物件");
         return NULL;
@@ -2875,10 +2833,10 @@ static struct json_object *PosCall (Runtime *runtime, int line, u64 self,
 }
 
 static u64 CurrentUserTarget (Runtime *runtime, u64 self) {
-    if (self != 0 && UserFind (self) != NULL) return self;
-    if (runtime->self != 0 && UserFind (runtime->self) != NULL)
+    if (self != 0 && EntityKindOf (self) == ENTITY_KIND_USER) return self;
+    if (runtime->self != 0 && EntityKindOf (runtime->self) == ENTITY_KIND_USER)
         return runtime->self;
-    if (runtime->caller != 0 && UserFind (runtime->caller) != NULL)
+    if (runtime->caller != 0 && EntityKindOf (runtime->caller) == ENTITY_KIND_USER)
         return runtime->caller;
     return 0;
 }
@@ -2960,7 +2918,8 @@ static struct json_object *LockedCall (Runtime *runtime, int line,
         return NULL;
     }
     u64 id = json_object_get_uint64 (args[0]);
-    Object *object = FindObjectById (id);
+    Object *object = EntityKindOf (id) == ENTITY_KIND_OBJECT ?
+                       (Object *)EntityFind (id) : NULL;
     if (object == NULL) {
         RuntimeFail (runtime, line, "物件 %" PRIu64 " 不存在", id);
         return NULL;
@@ -2978,7 +2937,8 @@ static struct json_object *VisibilityCall (Runtime *runtime, int line, u64 self,
         return NULL;
     }
     u64 target = self != 0 ? self : runtime->self;
-    Object *object = FindObjectById (target);
+    Object *object = EntityKindOf (target) == ENTITY_KIND_OBJECT ?
+                       (Object *)EntityFind (target) : NULL;
     if (object == NULL) {
         RuntimeFail (runtime, line, "self 不是物件");
         return NULL;
@@ -2996,7 +2956,7 @@ static struct json_object *VisibilityCall (Runtime *runtime, int line, u64 self,
             return NULL;
         }
         u64 userId = json_object_get_uint64 (args[0]);
-        if (userId == 0 || UserFind (userId) == NULL) {
+        if (userId == 0 || EntityKindOf (userId) != ENTITY_KIND_USER) {
             RuntimeFail (runtime, line, "用户 %" PRIu64 " 不存在", userId);
             return NULL;
         }
@@ -3055,12 +3015,12 @@ static bool CopyEnvironmentLocal (Env *target, Env *source,
 static bool MakeForkName (const char *requested, char *name, size_t size) {
     int written = snprintf (name, size, "%s", requested);
     if (written < 0 || (size_t)written >= size) return false;
-    if (ObjectFindByName (name) == NULL) return true;
+    if (ObjectFind (name) == NULL) return true;
 
     for (int suffix = 1; suffix < 1000000; suffix++) {
         written = snprintf (name, size, "%s#%d", requested, suffix);
         if (written < 0 || (size_t)written >= size) return false;
-        if (ObjectFindByName (name) == NULL) return true;
+        if (ObjectFind (name) == NULL) return true;
     }
     return false;
 }
@@ -3088,7 +3048,8 @@ static struct json_object *ForkCall (Runtime *runtime, int line, u64 self,
     }
 
     u64 sourceId = self != 0 ? self : runtime->self;
-    Object *source = FindObjectById (sourceId);
+    Object *source = EntityKindOf (sourceId) == ENTITY_KIND_OBJECT ?
+                       (Object *)EntityFind (sourceId) : NULL;
     if (source == NULL) {
         RuntimeFail (runtime, line, "self 不是物件");
         return NULL;
@@ -3152,7 +3113,8 @@ static struct json_object *UntouchCall (Runtime *runtime, int line, u64 self,
         return NULL;
     }
     u64 target = self != 0 ? self : runtime->self;
-    Object *object = FindObjectById (target);
+    Object *object = EntityKindOf (target) == ENTITY_KIND_OBJECT ?
+                       (Object *)EntityFind (target) : NULL;
     if (object == NULL) {
         RuntimeFail (runtime, line, "self 不是物件");
         return NULL;
@@ -3192,7 +3154,8 @@ static struct json_object *AssetsCall (Runtime *runtime, int line, u64 self,
     }
 
     u64 target = self != 0 ? self : runtime->self;
-    Object *object = FindObjectById (target);
+    Object *object = EntityKindOf (target) == ENTITY_KIND_OBJECT ?
+                       (Object *)EntityFind (target) : NULL;
     if (object == NULL) return NULL;
 
     struct json_object *array = json_object_new_array ();
@@ -3262,9 +3225,12 @@ static struct json_object *MenuCall (Runtime *runtime, int line, u64 self,
     }
 
     u64 target = self != 0 ? self : runtime->self;
-    if (target != 0 && UserFind (target) == NULL && FindObjectById (target) == NULL) {
-        RuntimeFail (runtime, line, "self 不是用户或物件");
-        return NULL;
+    if (target != 0) {
+        EntityKind kind = EntityKindOf (target);
+        if (kind != ENTITY_KIND_USER && kind != ENTITY_KIND_OBJECT) {
+            RuntimeFail (runtime, line, "self 不是用户或物件");
+            return NULL;
+        }
     }
 
     if (argCount == 0) {
@@ -3332,7 +3298,7 @@ static struct json_object *MessagefCall (Runtime *runtime, int line, u64 target,
         return NULL;
     }
 
-    if (target != 0 && UserFind (target) == NULL) {
+    if (target != 0 && EntityKindOf (target) != ENTITY_KIND_USER) {
         TextBufferFree (&message);
         RuntimeFail (runtime, line, "用户 %" PRIu64 " 不存在", target);
         return NULL;
@@ -4652,7 +4618,7 @@ static bool ExecStatement (Runtime* runtime, Env* env, Stmt* stmt, ExecResult* e
                         json_object_put (value);
                         return false;
                     }
-                    if (FindObjectById (runtime->self) == NULL) {
+                    if (EntityKindOf (runtime->self) != ENTITY_KIND_OBJECT) {
                         RuntimeFail (runtime, stmt->line, "remove 只能用于物件脚本");
                         json_object_put (value);
                         return false;
@@ -4674,7 +4640,7 @@ static bool ExecStatement (Runtime* runtime, Env* env, Stmt* stmt, ExecResult* e
                         json_object_put (value);
                         return false;
                     }
-                    if (FindObjectById (runtime->self) == NULL) {
+                    if (EntityKindOf (runtime->self) != ENTITY_KIND_OBJECT) {
                         RuntimeFail (runtime, stmt->line,
                                      "%s 只能用于物件脚本", target->as.name);
                         json_object_put (value);

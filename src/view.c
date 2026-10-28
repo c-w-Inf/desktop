@@ -1,4 +1,5 @@
 #include "view.h"
+#include "cutils.h"
 
 #include <stddef.h>
 #include <stdlib.h>
@@ -6,7 +7,7 @@
 #include "object.h"
 #include "entity.h"
 #include "user.h"
-#include "net.h"
+#include "netclient.h"
 #include "raymath.h"
 
 #define MIN_ZOOM 0.2f
@@ -62,69 +63,76 @@ static const char *shadowFragmentShader =
     "}\n";
 #endif
 
-void ViewInit (View *view) {
-    // offset 固定在窗口中心，target 表示窗口中心对应的世界坐标
-    view->cam = (Camera2D){0};
-    view->cam.offset = (Vector2){GetScreenWidth () / 2.0f, GetScreenHeight () / 2.0f};
-    view->cam.zoom = 1.0f;
-    view->background = BACKGROUND_WHITE;
+Camera2D viewCam;
+BackgroundStyle viewBackground;
+Shader viewShadowShader;
+Object **viewDrawOrder;
+int viewDrawOrderCapacity;
+const Object *viewDragPreview;
+Vector2 viewDragPreviewPos;
+void ViewInit () {
 
-    view->drawOrder = NULL;
-    view->drawOrderCapacity = 0;
-    view->dragPreview = NULL;
-    view->dragPreviewPos = (Vector2){0};
+    viewCam = (Camera2D){0};
+    viewCam.offset = (Vector2){GetScreenWidth () / 2.0f, GetScreenHeight () / 2.0f};
+    viewCam.zoom = 1.0f;
+    viewBackground = BACKGROUND_WHITE;
 
-    view->shadowShader = LoadShaderFromMemory (shadowVertexShader, shadowFragmentShader);
-    if (view->shadowShader.id != 0) {
-        int shadowColorLoc = GetShaderLocation (view->shadowShader, "shadowColor");
+    viewDrawOrder = NULL;
+    viewDrawOrderCapacity = 0;
+    viewDragPreview = NULL;
+    viewDragPreviewPos = (Vector2){0};
+
+    viewShadowShader = LoadShaderFromMemory (shadowVertexShader, shadowFragmentShader);
+    if (viewShadowShader.id != 0) {
+        int shadowColorLoc = GetShaderLocation (viewShadowShader, "shadowColor");
         Vector4 shadowColor = {0.01f, 0.01f, 0.02f, 0.12f};
-        SetShaderValue (view->shadowShader, shadowColorLoc, &shadowColor, SHADER_UNIFORM_VEC4);
+        SetShaderValue (viewShadowShader, shadowColorLoc, &shadowColor, SHADER_UNIFORM_VEC4);
     }
 }
 
-void ViewSetBackground (View *view, BackgroundStyle background) {
-    view->background = background;
+void ViewSetBackground (BackgroundStyle background) {
+    viewBackground = background;
 }
 
-void ViewUpdateViewport (View *view) {
-    // 窗口初始化/缩放后保持世界原点与窗口中心对齐
-    view->cam.offset = (Vector2){GetScreenWidth () / 2.0f, GetScreenHeight () / 2.0f};
+void ViewUpdateViewport () {
+
+    viewCam.offset = (Vector2){GetScreenWidth () / 2.0f, GetScreenHeight () / 2.0f};
 }
 
-void ViewSetOrigin (View *view) {
-    view->cam.target = (Vector2){0.0f, 0.0f};
+void ViewSetOrigin () {
+    viewCam.target = (Vector2){0.0f, 0.0f};
 }
 
-void ViewSetZoom (View *view, float zoom) {
+void ViewSetZoom (float zoom) {
     float newZoom = Clamp (zoom, MIN_ZOOM, MAX_ZOOM);
     Vector2 screenCenter = {(float)GetScreenWidth () / 2.0f, (float)GetScreenHeight () / 2.0f};
-    Vector2 worldBefore = GetScreenToWorld2D (screenCenter, view->cam);
-    view->cam.zoom = newZoom;
-    Vector2 worldAfter = GetScreenToWorld2D (screenCenter, view->cam);
-    view->cam.target = Vector2Add (view->cam.target, Vector2Subtract (worldBefore, worldAfter));
+    Vector2 worldBefore = GetScreenToWorld2D (screenCenter, viewCam);
+    viewCam.zoom = newZoom;
+    Vector2 worldAfter = GetScreenToWorld2D (screenCenter, viewCam);
+    viewCam.target = Vector2Add (viewCam.target, Vector2Subtract (worldBefore, worldAfter));
 }
 
-void ViewUnload (View *view) {
-    free (view->drawOrder);
-    view->drawOrder = NULL;
-    view->drawOrderCapacity = 0;
-    if (view->shadowShader.id != 0) UnloadShader (view->shadowShader);
+void ViewUnload () {
+    free (viewDrawOrder);
+    viewDrawOrder = NULL;
+    viewDrawOrderCapacity = 0;
+    if (viewShadowShader.id != 0) UnloadShader (viewShadowShader);
 }
 
-// 以光标为中心缩放
-void ViewZoomAt (View *view, Vector2 screenPoint, float wheel) {
-    Vector2 before = GetScreenToWorld2D (screenPoint, view->cam);
-    view->cam.zoom = Clamp (view->cam.zoom * powf (1.1f, wheel), MIN_ZOOM, MAX_ZOOM);
-    Vector2 after = GetScreenToWorld2D (screenPoint, view->cam);
-    view->cam.target = Vector2Add (view->cam.target, Vector2Subtract (before, after));
+
+void ViewZoomAt (Vector2 screenPoint, float wheel) {
+    Vector2 before = GetScreenToWorld2D (screenPoint, viewCam);
+    viewCam.zoom = Clamp (viewCam.zoom * powf (1.1f, wheel), MIN_ZOOM, MAX_ZOOM);
+    Vector2 after = GetScreenToWorld2D (screenPoint, viewCam);
+    viewCam.target = Vector2Add (viewCam.target, Vector2Subtract (before, after));
 }
 
-void ViewPan (View *view, Vector2 mouseDelta) {
-    view->cam.target = Vector2Subtract (view->cam.target, Vector2Scale (mouseDelta, 1.0f / view->cam.zoom));
+void ViewPan (Vector2 mouseDelta) {
+    viewCam.target = Vector2Subtract (viewCam.target, Vector2Scale (mouseDelta, 1.0f / viewCam.zoom));
 }
 
-Vector2 ViewScreenToWorld (const View *view, Vector2 screenPoint) {
-    return GetScreenToWorld2D (screenPoint, view->cam);
+Vector2 ViewScreenToWorld (Vector2 screenPoint) {
+    return GetScreenToWorld2D (screenPoint, viewCam);
 }
 
 static float BackgroundStep (float base, float zoom, float minScreen, float maxScreen) {
@@ -134,16 +142,16 @@ static float BackgroundStep (float base, float zoom, float minScreen, float maxS
     return step;
 }
 
-static void DrawBackground (const View *view) {
-    if (view->background == BACKGROUND_WHITE) return;
+static void DrawBackground () {
+    if (viewBackground == BACKGROUND_WHITE) return;
 
-    Vector2 topLeft = GetScreenToWorld2D ((Vector2){0.0f, 0.0f}, view->cam);
+    Vector2 topLeft = GetScreenToWorld2D ((Vector2){0.0f, 0.0f}, viewCam);
     Vector2 bottomRight = GetScreenToWorld2D (
-        (Vector2){(float)GetScreenWidth (), (float)GetScreenHeight ()}, view->cam);
+        (Vector2){(float)GetScreenWidth (), (float)GetScreenHeight ()}, viewCam);
 
-    if (view->background == BACKGROUND_DOTS) {
-        float step = BackgroundStep (40.0f, view->cam.zoom, 22.0f, 120.0f);
-        float radius = 1.6f / view->cam.zoom;
+    if (viewBackground == BACKGROUND_DOTS) {
+        float step = BackgroundStep (40.0f, viewCam.zoom, 22.0f, 120.0f);
+        float radius = 1.6f / viewCam.zoom;
         float startX = floorf (topLeft.x / step) * step;
         float startY = floorf (topLeft.y / step) * step;
         Color color = {175, 175, 175, 255};
@@ -153,9 +161,9 @@ static void DrawBackground (const View *view) {
                 DrawCircleV ((Vector2){x, y}, radius, color);
             }
         }
-    } else if (view->background == BACKGROUND_GRID) {
-        float step = BackgroundStep (48.0f, view->cam.zoom, 24.0f, 160.0f);
-        float thickness = 1.0f / view->cam.zoom;
+    } else if (viewBackground == BACKGROUND_GRID) {
+        float step = BackgroundStep (48.0f, viewCam.zoom, 24.0f, 160.0f);
+        float thickness = 1.0f / viewCam.zoom;
         float startX = floorf (topLeft.x / step) * step;
         float startY = floorf (topLeft.y / step) * step;
         Color color = {205, 205, 205, 255};
@@ -168,8 +176,8 @@ static void DrawBackground (const View *view) {
             DrawRectangleRec ((Rectangle){topLeft.x, y - thickness / 2.0f,
                                           bottomRight.x - topLeft.x, thickness}, color);
         }
-    } else if (view->background == BACKGROUND_CHECKER) {
-        float tile = BackgroundStep (32.0f, view->cam.zoom, 18.0f, 120.0f);
+    } else if (viewBackground == BACKGROUND_CHECKER) {
+        float tile = BackgroundStep (32.0f, viewCam.zoom, 18.0f, 120.0f);
         int startX = (int)floorf (topLeft.x / tile);
         int endX = (int)floorf (bottomRight.x / tile);
         int startY = (int)floorf (topLeft.y / tile);
@@ -187,12 +195,12 @@ static void DrawBackground (const View *view) {
     }
 }
 
-static Vector2 ObjectDrawPos (const View *view, const Object *object) {
-    return object == view->dragPreview ? view->dragPreviewPos : object->pos;
+static Vector2 ObjectDrawPos (const Object *object) {
+    return object == viewDragPreview ? viewDragPreviewPos : object->pos;
 }
 
-static void DrawObjectShadow (const View *view, const Object *object) {
-    if (view->shadowShader.id == 0 || object->assets.count == 0) return;
+static void DrawObjectShadow (const Object *object) {
+    if (viewShadowShader.id == 0 || object->assets.count == 0) return;
 
     static const Vector2 offsets[] = {
         { 3.0f,  0.0f}, {-3.0f,  0.0f}, { 0.0f,  3.0f}, { 0.0f, -3.0f},
@@ -201,21 +209,21 @@ static void DrawObjectShadow (const View *view, const Object *object) {
         { 5.0f,  5.0f}, {-5.0f,  5.0f}, { 5.0f, -5.0f}, {-5.0f, -5.0f}
     };
     const int offsetCount = (int)(sizeof (offsets) / sizeof (offsets[0]));
-    const float inverseZoom = 1.0f / view->cam.zoom;
+    const float inverseZoom = 1.0f / viewCam.zoom;
 
-    BeginShaderMode (view->shadowShader);
+    BeginShaderMode (viewShadowShader);
 
     if (object->assets.count > 0) {
         const Asset *asset = ObjectDisplayedAsset (object);
         if (asset != NULL) {
-            Vector2 drawPos = ObjectDrawPos (view, object);
+            Vector2 drawPos = ObjectDrawPos (object);
             Vector2 base = {
-                drawPos.x - asset->width / 2.0f,
-                drawPos.y - asset->height / 2.0f};
-            Rectangle source = {0, 0, (float)asset->width, (float)asset->height};
+                drawPos.x - AssetTexture(asset).width / 2.0f,
+                drawPos.y - AssetTexture(asset).height / 2.0f};
+            Rectangle source = {0, 0, (float)AssetTexture(asset).width, (float)AssetTexture(asset).height};
             for (int i = 0; i < offsetCount; i++) {
                 Vector2 position = Vector2Add (base, Vector2Scale (offsets[i], inverseZoom));
-                DrawTextureRec (asset->tex, source, position, WHITE);
+                DrawTextureRec (AssetTexture(asset), source, position, WHITE);
             }
         }
     }
@@ -223,25 +231,27 @@ static void DrawObjectShadow (const View *view, const Object *object) {
     EndShaderMode ();
 }
 
-static void DrawObjectLockLabel (const View *view, const Object *object, Font font) {
+static void DrawObjectLockLabel (const Object *object) {
     if (object->lockOwnerId == 0 || object->lockOwnerId == NetClientUserId () ||
         object->assets.count == 0) return;
 
     const Asset *asset = ObjectDisplayedAsset (object);
-    const User *owner = UserFind (object->lockOwnerId);
+    const User *owner = EntityKindOf (object->lockOwnerId) == ENTITY_KIND_USER
+                            ? (User *)EntityFind (object->lockOwnerId)
+                            : NULL;
     if (asset == NULL || owner == NULL) return;
 
-    Vector2 drawPos = ObjectDrawPos (view, object);
+    Vector2 drawPos = ObjectDrawPos (object);
     Vector2 corner = GetWorldToScreen2D (
-        (Vector2){drawPos.x + asset->width / 2.0f,
-                  drawPos.y + asset->height / 2.0f}, view->cam);
+        (Vector2){drawPos.x + AssetTexture(asset).width / 2.0f,
+                  drawPos.y + AssetTexture(asset).height / 2.0f}, viewCam);
 
-    // 标签属于物件绘制顺序的一部分，后续物件可以遮挡它。
+
     EndMode2D ();
-    DrawTextEx (font, owner->name,
+    DrawTextEx (CutilsFont, owner->name,
                 (Vector2){corner.x + 5.0f, corner.y + 2.0f},
                 20.0f, 0.0f, UserColor (owner));
-    BeginMode2D (view->cam);
+    BeginMode2D (viewCam);
 }
 
 static int CompareObjectsForDraw (const void *a, const void *b) {
@@ -250,59 +260,59 @@ static int CompareObjectsForDraw (const void *a, const void *b) {
     return ObjectCompareDrawOrder (objectA, objectB);
 }
 
-void ViewSetDragPreview (View *view, const Object *object, Vector2 position) {
-    view->dragPreview = object;
-    view->dragPreviewPos = position;
+void ViewSetDragPreview (const Object *object, Vector2 position) {
+    viewDragPreview = object;
+    viewDragPreviewPos = position;
 }
 
-void ViewClearDragPreview (View *view) {
-    view->dragPreview = NULL;
+void ViewClearDragPreview () {
+    viewDragPreview = NULL;
 }
 
-void ViewDraw (View *view, const Object *chosen, Font font) {
-    BeginMode2D (view->cam);
+void ViewDraw (const Object *chosen) {
+    BeginMode2D (viewCam);
 
-    DrawBackground (view);
+    DrawBackground ();
 
     IdGroup objectIds = ObjectIds ();
     int objectCount = objectIds.count;
 
-    if (objectCount > view->drawOrderCapacity) {
-        Object **order = realloc (view->drawOrder, (size_t)objectCount * sizeof (Object *));
+    if (objectCount > viewDrawOrderCapacity) {
+        Object **order = realloc (viewDrawOrder, (size_t)objectCount * sizeof (Object *));
         if (order != NULL) {
-            view->drawOrder = order;
-            view->drawOrderCapacity = objectCount;
+            viewDrawOrder = order;
+            viewDrawOrderCapacity = objectCount;
         }
     }
 
-    bool sorted = (objectCount <= view->drawOrderCapacity);
+    bool sorted = (objectCount <= viewDrawOrderCapacity);
     if (sorted) {
         for (int i = 0; i < objectCount; i++)
-            view->drawOrder[i] = EntityFind (objectIds.ids[i]);
+            viewDrawOrder[i] = EntityFind (objectIds.ids[i]);
         if (objectCount > 1)
-            qsort (view->drawOrder, (size_t)objectCount, sizeof (Object *),
+            qsort (viewDrawOrder, (size_t)objectCount, sizeof (Object *),
                    CompareObjectsForDraw);
     }
 
     for (int i = 0; i < objectCount; i++) {
-        const Object *object = sorted ? view->drawOrder[i] : EntityFind (objectIds.ids[i]);
+        const Object *object = sorted ? viewDrawOrder[i] : EntityFind (objectIds.ids[i]);
         if (object == NULL || object->hidden) continue;
 
         if (object == chosen || object->lockOwnerId != 0)
-            DrawObjectShadow (view, object);
+            DrawObjectShadow (object);
 
         if (object->assets.count > 0) {
             const Asset *asset = ObjectDisplayedAsset (object);
             if (asset != NULL) {
-                Vector2 drawPos = ObjectDrawPos (view, object);
+                Vector2 drawPos = ObjectDrawPos (object);
                 Vector2 position = {
-                    drawPos.x - asset->width / 2.0f,
-                    drawPos.y - asset->height / 2.0f};
-                Rectangle source = {0, 0, (float)asset->width, (float)asset->height};
-                DrawTextureRec (asset->tex, source, position, WHITE);
+                    drawPos.x - AssetTexture(asset).width / 2.0f,
+                    drawPos.y - AssetTexture(asset).height / 2.0f};
+                Rectangle source = {0, 0, (float)AssetTexture(asset).width, (float)AssetTexture(asset).height};
+                DrawTextureRec (AssetTexture(asset), source, position, WHITE);
             }
         }
-        DrawObjectLockLabel (view, object, font);
+        DrawObjectLockLabel (object);
     }
 
     IdGroupUnload (&objectIds);

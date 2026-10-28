@@ -14,6 +14,7 @@ typedef struct {
     void* ptr;
     void* data;
     EntityDestroyFn destroy;
+    EntityKind kind;
 } Entity;
 
 static Entity* entities;
@@ -88,8 +89,9 @@ static bool EntityReserve (void) {
     return true;
 }
 
-bool EntityRegister (u64 id, void* ptr) {
-    if (id == 0 || id == ENTITY_TOMBSTONE || ptr == NULL) return false;
+bool EntityRegister (u64 id, void* ptr, EntityKind kind) {
+    if (id == 0 || id == ENTITY_TOMBSTONE || ptr == NULL ||
+        kind == ENTITY_KIND_NONE) return false;
     if (!EntityReserve ()) return false;
 
     size_t mask = entityCapacity - 1;
@@ -111,6 +113,7 @@ bool EntityRegister (u64 id, void* ptr) {
     entities[index].ptr = ptr;
     entities[index].data = NULL;
     entities[index].destroy = NULL;
+    entities[index].kind = kind;
     entityCount++;
     return true;
 }
@@ -128,6 +131,7 @@ void EntityUnregister (u64 id) {
             entities[index].ptr = NULL;
             entities[index].data = NULL;
             entities[index].destroy = NULL;
+            entities[index].kind = ENTITY_KIND_NONE;
             entityCount--;
             tombstoneCount++;
             return;
@@ -146,6 +150,18 @@ void* EntityFind (u64 id) {
         index = (index + 1) & mask;
     }
     return NULL;
+}
+
+EntityKind EntityKindOf (u64 id) {
+    if (id == 0 || entityCapacity == 0) return ENTITY_KIND_NONE;
+
+    size_t mask = entityCapacity - 1;
+    size_t index = HashId (id) & mask;
+    while (entities[index].id != 0) {
+        if (entities[index].id == id) return entities[index].kind;
+        index = (index + 1) & mask;
+    }
+    return ENTITY_KIND_NONE;
 }
 
 bool EntitySetData (u64 id, void *data, EntityDestroyFn destroy) {

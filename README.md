@@ -41,7 +41,7 @@
 物件（含物件环境）和菜单合并进当前场景。素材、物件或全局变量重名时保留现有内容，跳过冲突项，
 并在 host 窗口通过提示条显示冲突；无头服务端直接打印到 stderr。
 
-存档沿用联机全量同步的场景范围，但联机快照使用 ID 且不包含脚本环境和菜单函数；存档把引用
+存档沿用联机场景范围，联机同步使用 ID 且不包含脚本环境和菜单函数；存档把引用
 全部换成名称字符串，并额外保存环境与菜单函数。
 
 存档是 ZIP 压缩包，只是把扩展名改成 `.dsk`；解压后结构如下：
@@ -100,7 +100,8 @@ dsk/
 ## 目录结构
 
 ```text
-image_canvas      编译出的二进制（不提交）
+desktop           客户端二进制（不提交）
+desktop_server    服务端二进制（不提交）
 src/              源代码
 assets/           字体许可证；字体由 CMake 查找或下载
 third_party/      tinyfiledialogs 等第三方源码
@@ -115,7 +116,7 @@ README.md
 Git 跟踪源码、CMakeLists.txt、README、`.gitignore`、`.github/`、`assets/` 和
 `third_party/`。以下内容不会提交：
 
-- `image_canvas`、`build/`、`compile_commands.json`
+- `desktop`、`desktop_server`、`build/`、`compile_commands.json`
 - `dsk/`、`*.dsk`、`*.dsk.tmp*`
 - 本地下载并构建的 `.local/`
 
@@ -168,12 +169,12 @@ raylib 6.2，不需要把 Linux 版 raylib 二进制放进仓库。
 
 | 文件 | 职责 |
 | --- | --- |
-| `src/client.c` | 客户端联机：连接、请求、增量应用 |
-| `src/client_ui.c` / `src/client.h` | 已连接后的客户端主循环：UI、拖放、锁定 pending、加载动画和渲染 |
+| `src/client.c` / `src/client.h` | 客户端主循环、输入、拖放和联机网络实现 |
+| `src/netclient.h` | 客户端联机请求接口 |
 | `src/main.c` | 原生入口：参数、窗口、本地服务端、连接和客户端启动 |
 | `src/main_web.c` | Web 入口：URL 参数、浏览器连接和逐帧客户端循环 |
-| `src/utils.c` / `src/utils.h` | 公共 `u64`、`IdGroup`、`TextBuffer`、`StrDup` 和随机数工具 |
-| `src/cutils.c` / `src/cutils.h` | 跨平台文件对话框、目录判断和文件读取 |
+| `src/utils/` / `src/utils.h` | 公共类型、`RawFile`、`IdGroup`、`TextBuffer`、字符串、路径、信号和随机数工具 |
+| `src/cutils.c` / `src/cutils.h` | 跨平台文件对话框和目录判断 |
 | `src/script.c` / `src/script.h` | 脚本解释器：现场解析、按 self 隔离的环境、函数支持参数并内置 `messagef`/`object`/`user`/`flip`/`size`/`assets`/`typeof`/`menu`/`rand`/`int`/`move`/`pos`/`locked`/`color`/`script`/`fork`/`untouch`/`hide`/`show`；运行时值使用 json-c，原生支持 `u64` |
 | `third_party/tinyfiledialogs.c` / `.h` | 跨平台原生文件/文件夹对话框（zlib licence） |
 | `src/entity.c` / `src/entity.h` | 哈希表：id → 对象指针，平均 O(1) 查找 |
@@ -182,15 +183,15 @@ raylib 6.2，不需要把 Linux 版 raylib 二进制放进仓库。
 | `src/strmap.c` / `src/strmap.h` | 哈希字符串 → `void *` 索引，惰性构建按名称排序的遍历视图 |
 | `src/netutils.h` / `src/netutils.c` | 跨平台传输抽象：native libuv TCP，Web 端保留 TCP 监听 stub |
 | `src/control.c` / `src/control.h` | 本地 GUI 与服务端之间的 libuv 控制管道 |
-| `src/server.c` | 服务端：监听、权威场景、锁定、脚本、快照和增量广播 |
+| `src/server.c` | 服务端：监听、权威场景、锁定、脚本和增量广播 |
 | `src/net_common.h` | 客户端/服务端共享的协议常量、Buffer/Reader 和帧编码 |
-| `src/net.h` | 客户端与服务端公共接口 |
+| `src/net.c` / `src/net.h` | 双向网络包 typed 结构、解析/释放函数和服务端网络接口；客户端请求接口见 `src/netclient.h` |
 | `src/assets.c` / `src/assets.h` | 素材库：name → id 有序索引；`Asset` 逐个 malloc 并由 entity 按 id 注册 |
 | `src/object.c` / `src/object.h` | 物件：name → id 有序索引；`Object` 逐个 malloc 并由 entity 按 id 注册，持有素材数组、层数、时间戳、位置、命中检测 |
 | `src/save.c` / `src/save.h` | 服务端存档与导入：libzip 读写 `.dsk`，libuv 处理路径、目录和原子替换；不保存用户私有数据 |
 | `src/hjson.c` / `src/hjson.h` | 内部 HJSON 解析器：兼容标准 JSON，支持注释、无引号字段/字符串、可选逗号、根对象省略括号和多行字符串 |
 | `src/view.c` / `src/view.h` | 相机与渲染：缩放、平移、坐标转换、背景图案、按层数/时间戳排序绘制物件、选中阴影 shader |
-| `src/ui.c` / `src/ui.h` | UI：字体、菜单栏、连接对话框、文件对话框、素材/物件管理窗口、物件素材弹窗、重命名输入 |
+| `src/ui.c` / `src/ui.h` | UI 工具：字体、菜单栏、连接对话框、文件对话框、素材/物件管理窗口、物件素材弹窗、重命名输入 |
 
 素材和物件通过 `entity.c` 建立 64 位 `id` 到对象指针的映射；`id` 只由服务端统一分配。
 联机同步和物件对素材的引用都使用 `id`，名称只用于显示，服务端保证名称唯一。素材默认命名为
@@ -301,16 +302,12 @@ UI 通过 `UiEvent` 把「导入素材」「新建/重命名/删除物件」「�
 
 如果系统没有 `zenity`，也可以直接把图片拖进窗口（这会同时添加素材和物件）。
 
-素材选择窗口或文件对话框打开期间，拖入文件会被忽略。raylib 没有跨平台的“禁止拖入”
-窗口开关，所以在事件层处理：弹窗期间收到拖入事件后直接取出并丢弃，不添加素材或物件，
-也不留到关闭弹窗后再处理。
-
-如果是在素材选择窗口或文件对话框打开时拖入文件，会从窗口顶部滑出一条提示，
-约 3 秒后自动消失，不需要点击确认，也不会打断当前操作。
+拖入文件时不再根据弹窗状态丢弃事件；素材和物件会立即处理。物件管理器打开时每帧轮询
+当前锁定的物件，如果选中的物件失去锁，会自动关闭物件管理器及相关物件窗口。
 
 ## 本地模式
 
-直接运行 `./image_canvas` 时，程序会以同一可执行文件启动一个独立的本地服务端进程
+直接运行 `./desktop` 时，程序会启动同目录下的 `desktop_server` 作为本地服务端
 （`--server --port`），自动选择一个空闲端口，并以 `local` 用户名作为唯一客户端连入。
 素材和物件的创建、修改、锁定等操作与联机模式走完全相同的服务器请求流程。普通启动不会
 自动导入存档，也不会写存档；需要继续某个存档时使用 `文件 → 导入` 或 `文件 → 导入文件夹` 做增量合并，或命令行
@@ -325,28 +322,28 @@ UI 通过 `UiEvent` 把「导入素材」「新建/重命名/删除物件」「�
 
 ```bash
 # 无头服务器，默认端口 7777
-./image_canvas --server
+./desktop_server --server
 
 # 指定端口
-./image_canvas --server --port 9000
-./image_canvas --server 9000
+./desktop_server --server --port 9000
+./desktop_server --server 9000
 
 # 只读导入，不保存
-./image_canvas --server --load canvas.dsk
-./image_canvas --load canvas.dsk
+./desktop_server --server --load canvas.dsk
+./desktop --load canvas.dsk
 
 # 导入并保存回文件
-./image_canvas --server --load canvas.dsk --save canvas.dsk
-./image_canvas --load canvas.dsk --save canvas.dsk
+./desktop_server --server --load canvas.dsk --save canvas.dsk
+./desktop --load canvas.dsk --save canvas.dsk
 
 # 只指定保存文件，不导入
-./image_canvas --save canvas.dsk
+./desktop --save canvas.dsk
 
 # 远程客户端：IP 端口 用户名
-./image_canvas 192.168.1.10 7777 alice
+./desktop 192.168.1.10 7777 alice
 
 # 也可以显式指定用户名
-./image_canvas --name alice 192.168.1.10 7777
+./desktop --name alice 192.168.1.10 7777
 ```
 
 也可以在当前窗口点击 `联机 → 连接`，在弹出的窗口中填写用户名、IP 和端口，确认后
@@ -365,7 +362,7 @@ UI 通过 `UiEvent` 把「导入素材」「新建/重命名/删除物件」「�
 - 退出具体物件管理界面后继续保持选中和占用；切换选择或关闭管理器时释放
 - 打开顶栏菜单会取消当前画布物件选择，保证同一用户一次只选中一个物件
 - 占用：选中物件时发送占用包，取消选中或关闭管理器时发送释放包；服务器保证同一物件同时只有一个占用者
-- 锁定请求会先执行物件的 ontouch；如果回调中调用了 untouch()，untouch 会立即向请求者发送锁定失败包，不再发送重复失败或成功响应
+- 锁定请求会先执行物件的 ontouch；如果回调中调用了 untouch()，服务端会通知请求者锁失败并广播解锁状态
 - 物件有锁时，普通脚本调用 untouch() 也会向原持锁客户端发送锁定失败包；客户端据此清除已失效的选择/拖动状态
 - 在线状态：服务器保存每个用户的在线状态、光标世界坐标、颜色和 `canscript` 权限，并广播给其他客户端；用户加入时颜色默认为黑色、`canscript` 默认为 true，可分别用脚本 `color(r, g, b)` 和 `script(bool)` 修改
 - 脚本 `messagef` 在服务端生成消息：无 `@` 或 `@0` 时广播给所有客户端，`messagef("...")@用户ID` 只发送给指定用户
@@ -411,7 +408,7 @@ UI 通过 `UiEvent` 把「导入素材」「新建/重命名/删除物件」「�
 - 单次脚本执行有 1,000,000 行执行次数上限，超过后会强制终止并返回错误
 - 脚本解释器产生的解析和执行错误会广播给所有在线客户端，以红色提示显示；权限拒绝、菜单不存在等协议层错误仍只发给请求者
 - 脚本执行成功且有非 null 返回值时，服务端向调用者发送蓝色提示 `脚本已返回 <JSON>`
-- 服务器维护权威场景；新客户端连接时获取一次全量快照
+- 服务器维护权威场景；新客户端连接时依次接收当前素材、用户、物件和菜单
 - 服务端与客户端复用同一套 Asset/Object/User/Entity 管理 API；本地模式通过独立服务端进程隔离两份世界
 - 脚本只在服务端执行，脚本变量和环境只存在于服务端实体；客户端只接收消息和同步增量
 - 读取循环只解析帧并放入同一个请求队列；HELLO、场景修改、锁定和断开等请求由主循环按队列顺序单线程统一处理
@@ -435,7 +432,7 @@ UI 通过 `UiEvent` 把「导入素材」「新建/重命名/删除物件」「�
 - 每个用户最多同时占用一个物件；占用新物件会自动释放旧锁
 - 桌面绘制其他在线用户的光标：使用该用户颜色的圆点，右下角为同色小号用户名；物件锁标签和物件管理器中的占用者用户名也使用该颜色；用户颜色默认黑色
 - 拖动中的位置会持续同步给其他客户端，其他用户能看到连续移动
-- 远端增量只更新对应素材/物件；只有全量快照才会整体替换场景
+- 远端增量只更新对应素材、物件、用户和菜单
 - 服务器处理删除后，针对该物件的后续更新会被忽略，不会复活
 - 如果拖动中的物件被其他客户端删除，本地选择和拖动状态会立即清除
 - 名称冲突由服务器生成唯一名称，再同步回客户端
@@ -445,7 +442,7 @@ UI 通过 `UiEvent` 把「导入素材」「新建/重命名/删除物件」「�
 - 用户名在服务器内唯一；冲突时无法加入，客户端直接断开
 - 用户名只用于区分客户端，不是密码或鉴权
 - 已连接的客户端在服务器断开后直接关闭窗口，同步增量不弹提示
-- 服务器发现引用不一致时，会让相关客户端重新获取一次全量快照
+- 服务器收到引用已删除实体的过期请求时会直接忽略，删除广播会正常到达客户端
 - 服务器把场景保存在内存中，重启后清空
 - 最多 16 个客户端，TCP 端口默认 7777
 - 网络使用 libuv，Linux 和 Windows 共用同一套实现；没有鉴权，建议在可信局域网使用
@@ -454,16 +451,16 @@ UI 通过 `UiEvent` 把「导入素材」「新建/重命名/删除物件」「�
 
 ## 跨平台编译客户端
 
-客户端和本地服务端在同一个可执行文件 `image_canvas` 中。编译后直接运行是本地客户端：
+客户端 `desktop` 与本地服务端 `desktop_server` 是两个独立可执行文件。编译后直接运行 `desktop` 是本地客户端：
 
 ```bash
-./image_canvas
+./desktop
 ```
 
 作为远程客户端运行：
 
 ```bash
-./image_canvas <IP> <端口> <用户名>
+./desktop <IP> <端口> <用户名>
 ```
 
 通用依赖：CMake 3.20+、Ninja、C11 编译器、raylib 6.x、json-c、libuv、libzip、zlib。CMake 优先使用系统 raylib，找不到时通过 `FetchContent` 构建 raylib 6.2。字体由 CMake 自动查找或下载，不提交到仓库。
@@ -503,10 +500,10 @@ sudo ldconfig
 ```bash
 cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
 cmake --build build -j
-./image_canvas
+./desktop
 ```
 
-生成的客户端是源码根目录下的 `./image_canvas`。
+生成的客户端是源码根目录下的 `./desktop`。
 
 ### macOS
 
@@ -514,7 +511,7 @@ cmake --build build -j
 brew install cmake ninja pkg-config raylib json-c libuv libzip
 cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
 cmake --build build -j
-./image_canvas
+./desktop
 ```
 
 如果 Homebrew 的 raylib 不在默认路径：
@@ -541,10 +538,10 @@ pacman -S mingw-w64-ucrt-x86_64-gcc mingw-w64-ucrt-x86_64-cmake \
 ```bash
 cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
 cmake --build build -j
-./image_canvas.exe
+./desktop.exe
 ```
 
-生成 `image_canvas.exe`。在 MSYS2 外直接运行时，需要把 MSYS2 UCRT64 运行时 DLL 放到同一目录；GitHub Actions 的 Windows artifact 已自动打包这些 DLL。
+生成 `desktop.exe` 和 `desktop_server.exe`。在 MSYS2 外直接运行时，需要把 MSYS2 UCRT64 运行时 DLL 放到同一目录；GitHub Actions 的 Windows artifact 已自动打包这些 DLL。
 
 ### Web 客户端（Emscripten）
 

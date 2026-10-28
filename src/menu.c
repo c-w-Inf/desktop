@@ -1,5 +1,6 @@
 #include "menu.h"
 
+#include "entity.h"
 #include "object.h"
 #include "user.h"
 
@@ -24,16 +25,13 @@ int EntityGlobalMenuCount (void);
 const char* EntityGlobalMenuName (int index);
 const char* EntityGlobalMenuFunc (int index);
 
-static Object* FindObject (u64 id) {
-    return ObjectFindById (id);
-}
-
 bool MenuAdd (u64 id, const char* name, const char* func) {
     if (id == 0) return EntityGlobalMenuAdd (name, func);
-    User *user = UserFind (id);
-    if (user != NULL) return UserMenuAdd (user, name, func);
-    Object *object = FindObject (id);
-    if (object != NULL) return ObjectMenuAdd (object, name, func);
+    EntityKind kind = EntityKindOf (id);
+    if (kind == ENTITY_KIND_USER)
+        return UserMenuAdd ((User *)EntityFind (id), name, func);
+    if (kind == ENTITY_KIND_OBJECT)
+        return ObjectMenuAdd ((Object *)EntityFind (id), name, func);
     return false;
 }
 
@@ -42,13 +40,13 @@ void MenuClear (u64 id) {
         EntityGlobalMenuClear ();
         return;
     }
-    User *user = UserFind (id);
-    if (user != NULL) {
-        UserMenuClear (user);
+    EntityKind kind = EntityKindOf (id);
+    if (kind == ENTITY_KIND_USER) {
+        UserMenuClear ((User *)EntityFind (id));
         return;
     }
-    Object *object = FindObject (id);
-    if (object != NULL) ObjectMenuClear (object);
+    if (kind == ENTITY_KIND_OBJECT)
+        ObjectMenuClear ((Object *)EntityFind (id));
 }
 
 bool MenuSetNames (u64 id, const char* const* names, int count) {
@@ -56,36 +54,34 @@ bool MenuSetNames (u64 id, const char* const* names, int count) {
         EntityGlobalMenuSetNames (names, count);
         return true;
     }
-    User *user = UserFind (id);
-    if (user != NULL) return UserMenuSetNames (user, names, count);
-    Object *object = FindObject (id);
-    if (object != NULL) return ObjectMenuSetNames (object, names, count);
+    EntityKind kind = EntityKindOf (id);
+    if (kind == ENTITY_KIND_USER)
+        return UserMenuSetNames ((User *)EntityFind (id), names, count);
+    if (kind == ENTITY_KIND_OBJECT)
+        return ObjectMenuSetNames ((Object *)EntityFind (id), names, count);
     return false;
 }
 
 int MenuCount (u64 id) {
     if (id == 0) return EntityGlobalMenuCount ();
-    User *user = UserFind (id);
-    if (user != NULL) return UserMenuCount (user);
-    Object *object = FindObject (id);
-    if (object != NULL) return ObjectMenuCount (object);
+    EntityKind kind = EntityKindOf (id);
+    if (kind == ENTITY_KIND_USER) return UserMenuCount ((User *)EntityFind (id));
+    if (kind == ENTITY_KIND_OBJECT) return ObjectMenuCount ((Object *)EntityFind (id));
     return 0;
 }
 
 const char* MenuName (u64 id, int index) {
     if (id == 0) return EntityGlobalMenuName (index);
-    User *user = UserFind (id);
-    if (user != NULL) return UserMenuName (user, index);
-    Object *object = FindObject (id);
-    if (object != NULL) return ObjectMenuName (object, index);
+    EntityKind kind = EntityKindOf (id);
+    if (kind == ENTITY_KIND_USER) return UserMenuName ((User *)EntityFind (id), index);
+    if (kind == ENTITY_KIND_OBJECT) return ObjectMenuName ((Object *)EntityFind (id), index);
     return NULL;
 }
 
 const char* MenuFunc (u64 id, int index) {
     if (id == 0) return EntityGlobalMenuFunc (index);
-    User *user = UserFind (id);
-    if (user != NULL) return UserMenuFunc (user, index);
-    Object *object = FindObject (id);
-    if (object != NULL) return ObjectMenuFunc (object, index);
+    EntityKind kind = EntityKindOf (id);
+    if (kind == ENTITY_KIND_USER) return UserMenuFunc ((User *)EntityFind (id), index);
+    if (kind == ENTITY_KIND_OBJECT) return ObjectMenuFunc ((Object *)EntityFind (id), index);
     return NULL;
 }

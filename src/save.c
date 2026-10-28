@@ -241,15 +241,14 @@ static bool DskReadDirectoryTree (const char *root, const char *relative,
             break;
         }
 
-        int fileSize = 0;
-        unsigned char *data = ReadFileBytes (childPath, &fileSize);
-        if (data == NULL || (uint64_t)fileSize != (uint64_t)info.st_size ||
-            !DskZipAdd (zip, childRelative, data, (size_t)fileSize)) {
-            free (data);
+        RawFile file = RawFileRead (childPath);
+        if (file.data == NULL || (uint64_t)file.size != (uint64_t)info.st_size ||
+            !DskZipAdd (zip, childRelative, file.data, file.size)) {
+            RawFileFree (&file);
             ok = false;
             break;
         }
-        *total += (size_t)fileSize;
+        *total += file.size;
     }
     if (next != UV_EOF) ok = false;
     uv_fs_req_cleanup (&request);
@@ -273,6 +272,7 @@ static bool DskReadSource (const char *path, DskZip *zip) {
 }
 
 
+#ifdef DESKTOP_SERVER
 static bool DskEqualsN (const char *left, const char *right, size_t length) {
     for (size_t i = 0; i < length; i++) {
         unsigned char a = (unsigned char)left[i];
@@ -482,7 +482,7 @@ static bool DskLoadAssetsZip (const DskZip *zip, u64 *nextId,
             return false;
         }
 
-        if (AssetFindByName (name) != NULL) {
+        if (AssetFind (name) != NULL) {
             if (!merge) {
                 free (name);
                 free (ext);
@@ -495,11 +495,17 @@ static bool DskLoadAssetsZip (const DskZip *zip, u64 *nextId,
         }
 
         u64 id = merge ? allocId (context) : (*nextId)++;
-        Asset *asset = AssetAddRaw (name, ext, entry->data,
-                                    (int)entry->size, id);
+        Asset *asset = AssetCreate (name, id);
+        RawFile file = {(unsigned char *)entry->data, entry->size, ""};
+        snprintf (file.ext, sizeof (file.ext), "%s", ext);
+        if (asset == NULL || !AssetLoad (asset, file)) {
+            if (asset != NULL) AssetDelete (asset);
+            free (name);
+            free (ext);
+            return false;
+        }
         free (name);
         free (ext);
-        if (asset == NULL) return false;
     }
     return true;
 }
@@ -521,7 +527,7 @@ static bool DskLoadObjectsZip (const DskZip *zip, ScriptEnv *globalEnv,
         char *name = DskObjectName (relative);
         if (name == NULL) return false;
 
-        if (ObjectFindByName (name) != NULL) {
+        if (ObjectFind (name) != NULL) {
             if (!merge) {
                 free (name);
                 return false;
@@ -563,7 +569,7 @@ static bool DskLoadObjectsZip (const DskZip *zip, ScriptEnv *globalEnv,
                     refsOk = false;
                     continue;
                 }
-                Asset *asset = AssetFindByName (json_object_get_string (item));
+                Asset *asset = AssetFind (json_object_get_string (item));
                 if (asset == NULL) refsOk = false;
                 else refs[refCount++] = asset;
             }
@@ -634,7 +640,7 @@ static bool DskLoadObjectsZip (const DskZip *zip, ScriptEnv *globalEnv,
         ObjectTouch (object);
 
         for (int a = 0; a < refCount; a++) {
-            if (!IdGroupAdd (ObjectAssets (object), refs[a]->id)) {
+            if (!IdGroupAdd (ObjectAssets (object), AssetId(refs[a]))) {
                 ObjectDelete (object);
                 free (envText);
                 free (refs);
@@ -929,12 +935,12 @@ static bool DskPutMenu (struct json_object *root, const char *key, u64 id) {
 }
 
 static bool DskWriteAssetZip (DskWriter *writer, const Asset *asset) {
-    if (asset->fileSize < 0 ||
-        (asset->fileSize > 0 && asset->fileData == NULL)) return false;
+    RawFile file = AssetRawFile(asset);
+    if (file.size > 0 && file.data == NULL) return false;
 
-    const char *ext = asset->ext;
+    const char *ext = file.ext;
     bool addDot = ext[0] != '\0' && ext[0] != '.';
-    size_t nameLength = strlen (asset->name);
+    size_t nameLength = strlen (AssetName(asset));
     size_t extLength = strlen (ext);
     size_t prefixLength = strlen ("dsk/assets/");
     size_t pathLength = prefixLength + nameLength + (addDot ? 1 : 0) +
@@ -945,15 +951,14 @@ static bool DskWriteAssetZip (DskWriter *writer, const Asset *asset) {
     char *write = path;
     memcpy (write, "dsk/assets/", prefixLength);
     write += prefixLength;
-    memcpy (write, asset->name, nameLength);
+    memcpy (write, AssetName(asset), nameLength);
     write += nameLength;
     if (addDot) *write++ = '.';
     memcpy (write, ext, extLength);
     write += extLength;
     *write = '\0';
 
-    bool ok = DskZipWriteData (writer, path, asset->fileData,
-                               (size_t)asset->fileSize, false);
+    bool ok = DskZipWriteData (writer, path, file.data, file.size, false);
     free (path);
     return ok;
 }
@@ -970,13 +975,13 @@ static bool DskWriteObjectZip (DskWriter *writer, ScriptEnv *globalEnv,
     json_object_object_add (root, "assets", assets);
 
     for (int i = 0; i < object->assets.count; i++) {
-        Asset *asset = AssetFindById (object->assets.ids[i]);
+        Asset *asset = (Asset *)EntityFind (object->assets.ids[i]);
         if (asset == NULL) {
             json_object_put (root);
             return false;
         }
         if (json_object_array_add (assets,
-                                   json_object_new_string (asset->name)) != 0) {
+                                   json_object_new_string (AssetName(asset))) != 0) {
             json_object_put (root);
             return false;
         }
@@ -1121,28 +1126,27 @@ static bool DskWriteZip (const char *path, ScriptEnv *globalEnv) {
     return true;
 }
 
-bool SavePackFolderData (const char *path, unsigned char **data,
-                         size_t *size) {
-    if (path == NULL || path[0] == '\0' || data == NULL || size == NULL)
-        return false;
-    *data = NULL;
-    *size = 0;
+#endif
+
+RawFile SavePackFolderData (const char *path) {
+    RawFile result = {0};
+    if (path == NULL || path[0] == '\0') return result;
 
     DskZip source;
-    if (!DskReadSource (path, &source)) return false;
+    if (!DskReadSource (path, &source)) return result;
 
     char directory[1024];
     size_t directorySize = sizeof (directory);
     if (uv_os_tmpdir (directory, &directorySize) != 0) {
         DskZipFree (&source);
-        return false;
+        return result;
     }
     char tempPath[1024];
     int needed = snprintf (tempPath, sizeof (tempPath),
-                           "%s/image-canvas-folder-XXXXXX", directory);
+                           "%s/desktop-folder-XXXXXX", directory);
     if (needed < 0 || (size_t)needed >= sizeof (tempPath)) {
         DskZipFree (&source);
-        return false;
+        return result;
     }
 
     uv_fs_t request;
@@ -1150,7 +1154,7 @@ bool SavePackFolderData (const char *path, unsigned char **data,
     uv_fs_req_cleanup (&request);
     if (fd < 0) {
         DskZipFree (&source);
-        return false;
+        return result;
     }
     uv_fs_close (NULL, &request, fd, NULL);
     uv_fs_req_cleanup (&request);
@@ -1176,22 +1180,18 @@ bool SavePackFolderData (const char *path, unsigned char **data,
     }
 
     if (ok) {
-        int length = 0;
-        unsigned char *packed = ReadFileBytes (tempPath, &length);
-        if (packed != NULL && length > 0) {
-            *data = packed;
-            *size = (size_t)length;
-        } else {
-            free (packed);
-            ok = false;
+        result = RawFileRead (tempPath);
+        if (result.data != NULL) {
+            snprintf (result.ext, sizeof (result.ext), "%s", ".dsk");
         }
     }
     uv_fs_unlink (NULL, &request, tempPath, NULL);
     uv_fs_req_cleanup (&request);
     DskZipFree (&source);
-    return ok;
+    return result;
 }
 
+#ifdef DESKTOP_SERVER
 bool SaveMerge (const char *path, ScriptEnv *globalEnv,
                 SaveIdAllocator allocId, void *context,
                 TextBuffer *conflicts) {
@@ -1236,3 +1236,4 @@ bool SaveWrite (const char *path, ScriptEnv *globalEnv) {
         return false;
     return DskWriteZip (path, globalEnv);
 }
+#endif

@@ -10,10 +10,12 @@
 
 #include "raylib.h"
 #include "raymath.h"
+#include "rlgl.h"
 #include "assets.h"
-#include "client.h"
 #include "entity.h"
-#include "net.h"
+#include "client.h"
+#include "cutils.h"
+#include "netclient.h"
 #include "object.h"
 #include "ui.h"
 #include "user.h"
@@ -72,23 +74,6 @@ static bool WebQueryValue (const char *query, const char *key,
     return false;
 }
 
-static void WebPump (void) {
-}
-
-static bool WebOpenRemote (const char *program, const char *host, int port,
-                           const char *username) {
-    (void)program;
-    char endpoint[512];
-    snprintf (endpoint, sizeof (endpoint), "ws://%s:%d", host, port);
-    EM_ASM({
-        const endpoint = UTF8ToString($0);
-        const name = UTF8ToString($1);
-        window.open("?server=" + encodeURIComponent(endpoint) +
-                    "&name=" + encodeURIComponent(name), "_blank");
-    }, endpoint, username);
-    return true;
-}
-
 static bool webFontLoaded;
 static bool webFontFailed;
 
@@ -129,39 +114,90 @@ static void WebErrorFrame (void) {
 }
 
 
-static void WebSyncCanvas (void) {
+static float WebDpr (void) {
+    return (float)EM_ASM_DOUBLE({ return window.devicePixelRatio || 1.0; });
+}
+
+static int webCssWidth;
+static int webCssHeight;
+static float webDpr = 1.0f;
+
+static void WebApplyProjection (int width, int height) {
+    rlViewport (0, 0, (int)(webCssWidth*webDpr), (int)(webCssHeight*webDpr));
+    rlMatrixMode (RL_PROJECTION);
+    rlLoadIdentity ();
+    rlOrtho (0, width, height, 0, 0, 1);
+    rlMatrixMode (RL_MODELVIEW);
+    rlLoadIdentity ();
+}
+
+static void WebConfigureCanvas (int cssWidth, int cssHeight, float dpr) {
+    int pixelWidth = (int)(cssWidth*dpr);
+    int pixelHeight = (int)(cssHeight*dpr);
     EM_ASM({
         var canvas = document.getElementById("canvas");
         if (!canvas) return;
+        canvas.width = $0;
+        canvas.height = $1;
+        canvas.style.setProperty("width", $2 + "px", "important");
+        canvas.style.setProperty("height", $3 + "px", "important");
         canvas.style.position = "fixed";
         canvas.style.left = "0";
         canvas.style.top = "0";
         canvas.style.margin = "0";
-        canvas.style.width = canvas.width + "px";
-        canvas.style.height = canvas.height + "px";
         canvas.style.zIndex = "10";
-    });
+        canvas.style.imageRendering = "auto";
+    }, pixelWidth, pixelHeight, cssWidth, cssHeight);
+    webCssWidth = cssWidth;
+    webCssHeight = cssHeight;
+    webDpr = dpr;
+    WebApplyProjection (cssWidth, cssHeight);
 }
 
-static EM_BOOL WebOnResize (int eventType, const EmscriptenUiEvent *event,
-                            void *user) {
-    (void)eventType;
-    (void)user;
-    SetWindowSize (event->windowInnerWidth, event->windowInnerHeight);
+static void WebSyncCanvas (void) {
+    int cssWidth = EM_ASM_INT({ return window.innerWidth; });
+    int cssHeight = EM_ASM_INT({ return window.innerHeight; });
+    EM_ASM({
+        var canvas = document.getElementById("canvas");
+        if (canvas) {
+            canvas.style.setProperty("width", $0 + "px", "important");
+            canvas.style.setProperty("height", $1 + "px", "important");
+        }
+    }, cssWidth, cssHeight);
+    int canvasWidth = EM_ASM_INT({
+        var canvas = document.getElementById("canvas");
+        return canvas ? canvas.width : 0;
+    });
+    int canvasHeight = EM_ASM_INT({
+        var canvas = document.getElementById("canvas");
+        return canvas ? canvas.height : 0;
+    });
+    float dpr = WebDpr ();
+    int pixelWidth = (int)(cssWidth*dpr);
+    int pixelHeight = (int)(cssHeight*dpr);
+    if (cssWidth != webCssWidth || cssHeight != webCssHeight || dpr != webDpr ||
+        pixelWidth != canvasWidth || pixelHeight != canvasHeight) {
+        WebConfigureCanvas (cssWidth, cssHeight, dpr);
+    }
+}
+
+static void WebFrame (void) {
     WebSyncCanvas ();
-    return EM_TRUE;
+    WebApplyProjection (webCssWidth, webCssHeight);
+    if (!ClientFrame ()) {
+        NetClientDisconnect ();
+        emscripten_cancel_main_loop ();
+    }
 }
 
 int main (void) {
     SetConfigFlags (FLAG_WINDOW_RESIZABLE | FLAG_VSYNC_HINT);
-    InitWindow (1000, 700, "Image Canvas");
-    if (!IsWindowReady ()) return 1;
     int initialWidth = EM_ASM_INT({ return window.innerWidth; });
     int initialHeight = EM_ASM_INT({ return window.innerHeight; });
-    SetWindowSize (initialWidth, initialHeight);
-    WebSyncCanvas ();
-    emscripten_set_resize_callback (EMSCRIPTEN_EVENT_TARGET_WINDOW, NULL, 0,
-                                    WebOnResize);
+    InitWindow (initialWidth, initialHeight, "desktop");
+    if (!IsWindowReady ()) return 1;
+    WebConfigureCanvas (initialWidth, initialHeight, WebDpr ());
+    CutilsInitInput ();
     EM_ASM({
         var element = document.getElementById("status");
         if (element) element.style.display = "none";
@@ -186,10 +222,8 @@ int main (void) {
 
     WebLoadFont ();
 
-    Ui ui;
-    UiInit (&ui);
-    View view;
-    ViewInit (&view);
+    UiInit ();
+    ViewInit ();
 
     char serverText[512];
     char name[128];
@@ -211,8 +245,8 @@ int main (void) {
         return 0;
     }
 
-    ClientRun (&ui, &view, false, 0, "", WebPump, WebOpenRemote, "");
-    NetClientDisconnect ();
+    ClientInit (false, 0, "");
+    emscripten_set_main_loop (WebFrame, 0, 1);
     return 0;
 }
 

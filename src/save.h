@@ -5,22 +5,51 @@
 
 #include "script.h"
 
+/**
+ * @brief 自动保存间隔秒数。
+ */
 #define SAVE_INTERVAL_SECONDS 30
 
-// 将服务端当前内容原子写入 ZIP 结构的 path。globalEnv 为服务端全局脚本环境。
+/**
+ * @brief 将当前场景原子写入 ZIP 格式的 .dsk。
+ * @param path 目标文件路径。
+ * @param globalEnv 服务端全局脚本环境。
+ * @return 写入成功时为 true。
+ */
 bool SaveWrite (const char *path, ScriptEnv *globalEnv);
 
-// 从 path 读取 ZIP 存档。成功时 nextEntityId 为下一个可用实体 ID。
-// 用户环境和用户菜单不落盘。
+/**
+ * @brief 读取 .dsk 存档并替换当前场景。
+ * @param path 存档路径。
+ * @param globalEnv 服务端全局脚本环境。
+ * @param nextEntityId 输出下一个可用实体 ID。
+ * @return 读取成功时为 true；用户环境和用户菜单不落盘。
+ */
 bool SaveRead (const char *path, ScriptEnv *globalEnv, u64 *nextEntityId);
 
-/* 增量导入：合并全局环境、素材、物件（含物件环境）和菜单。
-   重名项不替换并写入 conflicts；allocId 提供新实体 ID。 */
+/**
+ * @brief 增量导入时分配新实体 ID 的回调。
+ * @param context 调用方上下文。
+ * @return 新实体 ID。
+ */
 typedef u64 (*SaveIdAllocator) (void *context);
+/**
+ * @brief 增量导入并合并场景内容。
+ * @param path .dsk 存档路径。
+ * @param globalEnv 服务端全局脚本环境。
+ * @param allocId 新实体 ID 分配回调。
+ * @param context 传给回调的上下文。
+ * @param conflicts 输出重名项，逐行追加。
+ * @return 合并流程完成时为 true，存在重名项也可能为 true。
+ */
 bool SaveMerge (const char *path, ScriptEnv *globalEnv,
                 SaveIdAllocator allocId, void *context, TextBuffer *conflicts);
 
-/* 把文件夹压缩成 .dsk 字节；成功后 *data 由调用者 free。 */
-bool SavePackFolderData (const char *path, unsigned char **data, size_t *size);
+/**
+ * @brief 将文件夹压缩为 .dsk 内存文件。
+ * @param path 文件夹路径。
+ * @return 压缩文件；失败时 data 为 NULL，调用方用 RawFileFree 释放。
+ */
+RawFile SavePackFolderData (const char *path);
 
 #endif

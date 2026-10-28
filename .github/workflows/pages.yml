@@ -31,8 +31,8 @@ jobs:
         run: cmake --build build-web
       - name: Stage
         run: |
-          test -f build-web/web/image_canvas.html
-          test -f build-web/web/image_canvas.data
+          test -f build-web/web/desktop.html
+          test -f build-web/web/desktop.data
           ls -lh build-web/web
       - uses: actions/upload-pages-artifact@v3
         with:

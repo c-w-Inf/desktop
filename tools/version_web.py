@@ -4,11 +4,11 @@ import sys
 root = sys.argv[1]
 version = "v20261026f"
 renames = {}
-for name in ("image_canvas.js", "image_canvas.wasm", "image_canvas.data"):
+for name in ("desktop.js", "desktop.wasm", "desktop.data"):
     old = os.path.join(root, name)
     if not os.path.exists(old):
         continue
-    new_name = name.replace("image_canvas.", "image_canvas." + version + ".")
+    new_name = name.replace("desktop.", "desktop." + version + ".")
     os.replace(old, os.path.join(root, new_name))
     renames[name] = new_name
 
