@@ -8,9 +8,10 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/wait.h>
 
 #include "raymath.h"
+extern void rlDrawRenderBatchActive (void);
+#include "cutils.h"
 
 #include "assets.h"
 #include "menu.h"
@@ -47,7 +48,24 @@ static const char *menuItems[UI_MENU_COUNT][3] = {
     {NULL},
     {"连接", "开放"},
 };
-static const int menuItemCounts[UI_MENU_COUNT] = {3, 0, 0, 0, 2};
+static int menuItemCounts[UI_MENU_COUNT] = {3, 0, 0, 0, 2};
+
+void UiSetLocalMode (Ui *ui, bool localMode) {
+#if defined(__EMSCRIPTEN__)
+    (void)localMode;
+    menuItems[0][1] = NULL;
+    menuItems[0][2] = NULL;
+    menuItemCounts[0] = 1;
+#else
+    menuItems[0][1] = "导入文件夹";
+    menuItems[0][2] = localMode ? "导出" : NULL;
+    menuItemCounts[0] = localMode ? 3 : 2;
+#endif
+    if (!localMode && ui->menuOpen == 0) {
+        ui->menuOpen = -1;
+        ui->submenuOpen = -1;
+    }
+}
 
 enum {
     VIEW_SUBMENU_NONE = -1,
@@ -94,131 +112,55 @@ static bool DiscardDroppedFiles (void) {
     return true;
 }
 
-// 打开系统文件对话框，返回选中的图片路径
+static bool DialogSucceeded (Ui *ui, CutilsDialogResult result,
+                             const char *failure) {
+    if (result == CUTILS_DIALOG_OK) return true;
+    if (result == CUTILS_DIALOG_CANCELLED ||
+        result == CUTILS_DIALOG_PENDING) return false;
+    if (result == CUTILS_DIALOG_TOO_LONG)
+        UiShowError (ui, "路径过长");
+    else
+        UiShowError (ui, failure);
+    return false;
+}
+
 static bool OpenImageDialog (Ui *ui, char *path, int pathSize) {
     path[0] = '\0';
-
-    FILE *pipe = popen ("zenity --file-selection --modal --title='选择图片' "
-                        "--file-filter='图片 | *.png *.jpg *.jpeg *.bmp *.tga *.gif *.qoi *.psd' "
-                        "2>/dev/null",
-                        "r");
-    if (pipe == NULL) {
-        UiShowError (ui, "打开文件对话框失败");
-        return false;
-    }
-
-    bool selected = false;
-
-    if (fgets (path, pathSize, pipe) != NULL) {
-        path[strcspn (path, "\r\n")] = '\0';
-        selected = (path[0] != '\0');
-    }
-
-    int status = pclose (pipe);
-    if (!selected && WIFEXITED (status) &&
-        (WEXITSTATUS (status) == 126 || WEXITSTATUS (status) == 127))
-        UiShowError (ui, "打开文件对话框失败");
-
-    // 文件对话框打开期间发生的拖入事件直接丢弃，并提示
+    CutilsDialogResult result = CutilsOpenImage (path, (size_t)pathSize);
+    bool ok = DialogSucceeded (ui, result, "打开文件对话框失败");
     if (DiscardDroppedFiles ()) UiShowError (ui, "弹窗打开时不能拖入文件");
-
-    return selected;
+    return ok;
 }
 
 static bool OpenImportDialog (Ui *ui, char *path, int pathSize) {
     path[0] = '\0';
-
-    FILE *pipe = popen ("zenity --file-selection --modal --title='导入' "
-                        "--file-filter='支持的文件 | *.dsk *.png *.jpg *.jpeg *.bmp *.tga *.gif *.qoi *.psd' "
-                        "2>/dev/null",
-                        "r");
-    if (pipe == NULL) {
-        UiShowError (ui, "打开文件对话框失败");
-        return false;
-    }
-
-    bool selected = false;
-    if (fgets (path, pathSize, pipe) != NULL) {
-        path[strcspn (path, "\r\n")] = '\0';
-        selected = path[0] != '\0';
-    }
-
-    int status = pclose (pipe);
-    if (!selected && WIFEXITED (status) &&
-        (WEXITSTATUS (status) == 126 || WEXITSTATUS (status) == 127))
-        UiShowError (ui, "打开文件对话框失败");
-    return selected;
+    CutilsDialogResult result = CutilsOpenImport (path, (size_t)pathSize);
+    return DialogSucceeded (ui, result, "打开文件对话框失败");
 }
 
 static bool OpenFolderDialog (Ui *ui, char *path, int pathSize) {
     path[0] = '\0';
-
-    FILE *pipe = popen ("zenity --file-selection --directory --modal "
-                        "--title='导入文件夹' 2>/dev/null",
-                        "r");
-    if (pipe == NULL) {
-        UiShowError (ui, "打开文件夹对话框失败");
-        return false;
-    }
-
-    bool selected = false;
-    if (fgets (path, pathSize, pipe) != NULL) {
-        path[strcspn (path, "\r\n")] = '\0';
-        selected = path[0] != '\0';
-    }
-
-    int status = pclose (pipe);
-    if (!selected && WIFEXITED (status) &&
-        (WEXITSTATUS (status) == 126 || WEXITSTATUS (status) == 127))
-        UiShowError (ui, "打开文件夹对话框失败");
-    return selected;
+    CutilsDialogResult result = CutilsOpenFolder (path, (size_t)pathSize);
+    return DialogSucceeded (ui, result, "打开文件夹对话框失败");
 }
 
 static bool OpenExportDialog (Ui *ui, char *path, int pathSize) {
     path[0] = '\0';
-
-    FILE *pipe = popen ("zenity --file-selection --save --confirm-overwrite --modal "
-                        "--title='导出存档' --filename='image_canvas.dsk' "
-                        "--file-filter='存档 | *.dsk' 2>/dev/null",
-                        "r");
-    if (pipe == NULL) {
-        UiShowError (ui, "打开文件对话框失败");
-        return false;
-    }
-
-    bool selected = false;
-    if (fgets (path, pathSize, pipe) != NULL) {
-        path[strcspn (path, "\r\n")] = '\0';
-        selected = path[0] != '\0';
-    }
-
-    int status = pclose (pipe);
-    if (!selected && WIFEXITED (status) &&
-        (WEXITSTATUS (status) == 126 || WEXITSTATUS (status) == 127))
-        UiShowError (ui, "打开文件对话框失败");
-    if (!selected) return false;
-
-    size_t length = strlen (path);
-    if (length < 4 || strcmp (path + length - 4, ".dsk") != 0) {
-        if ((size_t)pathSize <= length + 4) {
-            UiShowError (ui, "导出路径过长");
-            return false;
-        }
-        memcpy (path + length, ".dsk", sizeof (".dsk"));
-    }
-    return true;
+    CutilsDialogResult result = CutilsSaveDsk (path, (size_t)pathSize);
+    return DialogSucceeded (ui, result, "打开文件对话框失败");
 }
 
 static void LayoutMenus (Ui *ui) {
     float x = 8.0f;
     for (int i = 0; i < UI_MENU_COUNT; i++) {
-        if ((i == 0 && !ui->showFileMenu) ||
-            (i == 4 && !ui->showConnectMenu)) {
+        if (i == 4 && !ui->showConnectMenu) {
             ui->menuW[i] = 0.0f;
             ui->menuX[i] = x;
             continue;
         }
-        ui->menuW[i] = MeasureTextEx (ui->font, menuNames[i], UI_FONT_SIZE, 0).x + 32.0f;
+        float measured = MeasureTextEx (ui->font, menuNames[i], UI_FONT_SIZE, 0).x;
+        if (measured < 8.0f) measured = 72.0f;
+        ui->menuW[i] = measured + 32.0f;
         ui->menuX[i] = x;
         x += ui->menuW[i];
     }
@@ -254,7 +196,11 @@ static int *BuildFontCodepoints (int *count) {
 
 static Font LoadAppFont (const char *name, int size) {
     char path[1024];
+#if defined(__EMSCRIPTEN__)
+    snprintf (path, sizeof (path), "/assets/%s", name);
+#else
     snprintf (path, sizeof (path), "%sassets/%s", GetApplicationDirectory (), name);
+#endif
 
     int count = 0;
     int *codepoints = BuildFontCodepoints (&count);
@@ -267,10 +213,12 @@ static bool IsLoadedFont (Font font) {
     return font.texture.id != 0 && font.texture.id != GetFontDefault ().texture.id;
 }
 
+
 static void LoadFonts (Ui *ui) {
-    Font sans = LoadAppFont ("WenQuanYiMicroHei.ttf", UI_FONT_SIZE);
+    int atlasSize = UI_FONT_SIZE;
+    Font sans = LoadAppFont ("WenQuanYiMicroHei.ttf", atlasSize);
     if (!IsLoadedFont (sans))
-        sans = LoadAppFont ("unifont.otf", UI_FONT_SIZE);
+        sans = LoadAppFont ("unifont.otf", atlasSize);
 
     if (IsLoadedFont (sans)) {
         if (ui->customFont && ui->font.texture.id != sans.texture.id) UnloadFont (ui->font);
@@ -280,7 +228,7 @@ static void LoadFonts (Ui *ui) {
         ui->font = GetFontDefault ();
     }
 
-    Font mono = LoadAppFont ("WenQuanYiMicroHeiMono.ttf", UI_CODE_FONT_SIZE);
+    Font mono = LoadAppFont ("WenQuanYiMicroHeiMono.ttf", atlasSize);
     if (IsLoadedFont (mono)) {
         if (ui->customMonoFont && ui->monoFont.texture.id != mono.texture.id)
             UnloadFont (ui->monoFont);
@@ -308,16 +256,6 @@ void UiSetConnectMenuVisible (Ui *ui, bool visible) {
     LayoutMenus (ui);
 }
 
-void UiSetFileMenuVisible (Ui *ui, bool visible) {
-    if (ui->showFileMenu == visible) return;
-    ui->showFileMenu = visible;
-    if (!visible && ui->menuOpen == 0) {
-        ui->menuOpen = -1;
-        ui->submenuOpen = -1;
-    }
-    LayoutMenus (ui);
-}
-
 void UiOpenAssetManager (Ui *ui) {
     if (!ui->managerOpen) {
         ui->managerOpen = true;
@@ -331,7 +269,6 @@ static Ui *activeUi;
 void UiInit (Ui *ui) {
     activeUi = ui;
     ui->showConnectMenu = true;
-    ui->showFileMenu = true;
     ui->menuOpen = -1;
     ui->pickerOpen = false;
     ui->pickerScroll = 0.0f;
@@ -341,8 +278,6 @@ void UiInit (Ui *ui) {
     ui->objectManagerOpen = false;
     ui->objectScroll = 0.0f;
     ui->selectedObject = NULL;
-    ui->lastObjectClick = NULL;
-    ui->lastObjectClickTime = 0.0;
     ui->objectContextOpen = false;
     ui->contextObject = NULL;
     ui->contextPos = (Vector2){0};
@@ -352,8 +287,6 @@ void UiInit (Ui *ui) {
     ui->objectAssetsOpen = false;
     ui->assetsObject = NULL;
     ui->assetsObjectSelected = -1;
-    ui->assetsLastClickIndex = -1;
-    ui->assetsLastClickTime = 0.0;
     ui->assetsObjectScroll = 0.0f;
     ui->pickerObject = NULL;
     ui->renameOpen = false;
@@ -384,6 +317,10 @@ void UiInit (Ui *ui) {
     LoadFonts (ui);
 }
 
+void UiReloadFonts (Ui *ui) {
+    LoadFonts (ui);
+}
+
 void UiUnload (Ui *ui) {
     if (ui->customMonoFont && ui->monoFont.texture.id != ui->font.texture.id)
         UnloadFont (ui->monoFont);
@@ -393,6 +330,10 @@ void UiUnload (Ui *ui) {
 }
 
 static void ShowMessageKind (Ui *ui, const char *message, UiMessageKind kind) {
+    if (ui->messageCount < 0 || ui->messageCount > UI_MAX_MESSAGES) {
+        ui->messageCount = 0;
+        ui->messageTimes[0] = 0.0f;
+    }
     if (ui->messageCount == UI_MAX_MESSAGES) {
         memmove (ui->messages, ui->messages + 1,
                  (UI_MAX_MESSAGES - 1) * sizeof (ui->messages[0]));
@@ -443,8 +384,6 @@ void UiAssetDeleted (Ui *ui) {
 void UiObjectDeleted (Ui *ui) {
     ui->selectedObject = NULL;
     ui->objectScroll = 0.0f;
-    ui->lastObjectClick = NULL;
-    ui->lastObjectClickTime = 0.0;
     ui->objectContextOpen = false;
     ui->contextObject = NULL;
     ui->layerOpen = false;
@@ -453,8 +392,6 @@ void UiObjectDeleted (Ui *ui) {
     ui->objectAssetsOpen = false;
     ui->assetsObject = NULL;
     ui->assetsObjectSelected = -1;
-    ui->assetsLastClickIndex = -1;
-    ui->assetsLastClickTime = 0.0;
     ui->assetsObjectScroll = 0.0f;
     ui->pickerOpen = false;
     ui->pickerObject = NULL;
@@ -482,8 +419,6 @@ void UiResetSceneState (Ui *ui) {
     ui->objectManagerOpen = false;
     ui->objectScroll = 0.0f;
     ui->selectedObject = NULL;
-    ui->lastObjectClick = NULL;
-    ui->lastObjectClickTime = 0.0;
 
     ui->objectContextOpen = false;
     ui->contextObject = NULL;
@@ -495,8 +430,6 @@ void UiResetSceneState (Ui *ui) {
     ui->objectAssetsOpen = false;
     ui->assetsObject = NULL;
     ui->assetsObjectSelected = -1;
-    ui->assetsLastClickIndex = -1;
-    ui->assetsLastClickTime = 0.0;
     ui->assetsObjectScroll = 0.0f;
 
     ui->renameOpen = false;
@@ -938,9 +871,9 @@ void UiOpenObjectManager (Ui *ui, Object *selectObject) {
     ui->objectManagerOpen = true;
     ui->objectScroll = 0.0f;
     ui->selectedObject = NULL;
-    ui->lastObjectClick = NULL;
-    ui->lastObjectClickTime = 0.0;
-    if (selectObject != NULL) UiSelectObject (ui, selectObject);
+    if (selectObject != NULL &&
+        selectObject->lockOwnerId == NetClientUserId ())
+        UiSelectObject (ui, selectObject);
 }
 
 void UiOpenObjectAssets (Ui *ui, Object *object) {
@@ -949,8 +882,6 @@ void UiOpenObjectAssets (Ui *ui, Object *object) {
     ui->objectAssetsOpen = true;
     ui->assetsObject = object;
     ui->assetsObjectSelected = -1;
-    ui->assetsLastClickIndex = -1;
-    ui->assetsLastClickTime = 0.0;
     ui->assetsObjectScroll = 0.0f;
 }
 
@@ -1315,22 +1246,16 @@ static void UpdateObjectManager (Ui *ui, UiEvent *event, float wheel) {
 
                 if (object != ui->selectedObject ||
                     object->lockOwnerId != NetClientUserId ()) {
-                    event->action = UI_ACTION_LOCK_OBJECT;
-                    event->object = object;
-                    ui->selectedObject = object;
+                    if (object->lockOwnerId == NetClientUserId ()) {
+                        ui->selectedObject = object;
+                    } else {
+                        // 只有服务端确认锁定后才在管理器中高亮。
+                        ui->selectedObject = NULL;
+                        event->action = UI_ACTION_LOCK_OBJECT;
+                        event->object = object;
+                    }
                 }
 
-                double now = GetTime ();
-                if (object == ui->lastObjectClick && (now - ui->lastObjectClickTime) <= 0.35) {
-                    ui->lastObjectClick = NULL;
-                    ui->lastObjectClickTime = 0.0;
-                    UiOpenObjectAssets (ui, object);
-                    event->action = UI_ACTION_LOCK_OBJECT;
-                    event->object = object;
-                } else {
-                    ui->lastObjectClick = object;
-                    ui->lastObjectClickTime = now;
-                }
                 return;
         }
     }
@@ -1340,8 +1265,6 @@ static void UpdateObjectManager (Ui *ui, UiEvent *event, float wheel) {
         event->object = ui->selectedObject;
     }
     ui->selectedObject = NULL;
-    ui->lastObjectClick = NULL;
-    ui->lastObjectClickTime = 0.0;
 }
 
 static void UpdateObjectAssets (Ui *ui, UiEvent *event, float wheel) {
@@ -1370,8 +1293,6 @@ static void UpdateObjectAssets (Ui *ui, UiEvent *event, float wheel) {
         ui->objectAssetsOpen = false;
         ui->assetsObject = NULL;
         ui->assetsObjectSelected = -1;
-        ui->assetsLastClickIndex = -1;
-        ui->assetsLastClickTime = 0.0;
         ui->assetsObjectScroll = 0.0f;
         return;
     }
@@ -1417,8 +1338,6 @@ static void UpdateObjectAssets (Ui *ui, UiEvent *event, float wheel) {
             event->object = ui->assetsObject;
             event->assetIndex = ui->assetsObjectSelected;
             ui->assetsObjectSelected = -1;
-            ui->assetsLastClickIndex = -1;
-            ui->assetsLastClickTime = 0.0;
             return;
         }
     }
@@ -1426,24 +1345,12 @@ static void UpdateObjectAssets (Ui *ui, UiEvent *event, float wheel) {
     if (CheckCollisionPointRec (mouse, list)) {
         int index = (int)((mouse.y - list.y + ui->assetsObjectScroll) / UI_OBJECT_ASSET_ROW_HEIGHT);
         if (index >= 0 && index < count) {
-            double now = GetTime ();
-            bool doubleClick = ui->assetsLastClickIndex == index &&
-                               now - ui->assetsLastClickTime <= 0.35;
             ui->assetsObjectSelected = index;
-            ui->assetsLastClickIndex = index;
-            ui->assetsLastClickTime = now;
-            if (doubleClick) {
-                event->action = UI_ACTION_USE_OBJECT_ASSET;
-                event->object = ui->assetsObject;
-                event->assetIndex = index;
-            }
             return;
         }
     }
 
     ui->assetsObjectSelected = -1;
-    ui->assetsLastClickIndex = -1;
-    ui->assetsLastClickTime = 0.0;
 }
 
 static void UpdateRename (Ui *ui, UiEvent *event) {
@@ -1801,7 +1708,13 @@ static void UpdateScript (Ui *ui, UiEvent *event) {
 
 UiEvent UiUpdate (Ui *ui) {
     UiEvent event = {0};
+    LayoutMenus (ui);
     Vector2 mouse = GetMousePosition ();
+#if defined(__EMSCRIPTEN__)
+    if (IsMouseButtonPressed (MOUSE_BUTTON_LEFT)) {
+        fflush (stdout);
+    }
+#endif
     float wheel = GetMouseWheelMove ();
 
     if (!IsMouseButtonDown (MOUSE_BUTTON_LEFT)) ui->uiPress = false;
@@ -1908,11 +1821,13 @@ UiEvent UiUpdate (Ui *ui) {
     }
 
     if (IsMouseButtonPressed (MOUSE_BUTTON_LEFT)) {
+#if defined(__EMSCRIPTEN__)
+        fflush (stdout);
+#endif
         if (mouse.y <= UI_BAR_HEIGHT) {
             int hit = -1;
             for (int i = 0; i < UI_MENU_COUNT; i++) {
-                if ((i == 0 && !ui->showFileMenu) ||
-                    (i == 4 && !ui->showConnectMenu))
+                if (i == 4 && !ui->showConnectMenu)
                     continue;
                 Rectangle title = {ui->menuX[i], 0.0f, ui->menuW[i], UI_BAR_HEIGHT};
                 if (CheckCollisionPointRec (mouse, title)) {
@@ -1921,6 +1836,8 @@ UiEvent UiUpdate (Ui *ui) {
                 }
             }
 
+#if defined(__EMSCRIPTEN__)
+#endif
             if (hit >= 0) event.deselectObject = true;
 
             if (hit == 0) {
@@ -1996,13 +1913,13 @@ static float MenuTextY (Font font, const char *text, Rectangle item) {
 }
 
 static void DrawMenuBar (const Ui *ui) {
+    LayoutMenus ((Ui *)ui);
     Vector2 mouse = GetMousePosition ();
     DrawRectangle (0, 0, GetScreenWidth (), UI_BAR_HEIGHT, (Color){16, 18, 23, 255});
     DrawRectangle (0, UI_BAR_HEIGHT - 1, GetScreenWidth (), 1, (Color){55, 60, 72, 255});
 
     for (int i = 0; i < UI_MENU_COUNT; i++) {
-        if ((i == 0 && !ui->showFileMenu) ||
-            (i == 4 && !ui->showConnectMenu))
+        if (i == 4 && !ui->showConnectMenu)
             continue;
         Rectangle title = {ui->menuX[i], 0.0f, ui->menuW[i], UI_BAR_HEIGHT};
         if (ui->menuOpen == i)
@@ -2034,13 +1951,18 @@ static void DrawMenuBar (const Ui *ui) {
     }
 }
 
-static void DrawTextureFit (Texture2D texture, Rectangle box) {
-    float scale = fminf (box.width / texture.width, box.height / texture.height);
-    Vector2 position = {
-        box.x + (box.width - texture.width * scale) / 2.0f,
-        box.y + (box.height - texture.height * scale) / 2.0f};
-    DrawTextureEx (texture, position, 0.0f, scale, WHITE);
+static void DrawAssetFit (const Asset *asset, Rectangle box) {
+    if (asset == NULL || asset->width <= 0 || asset->height <= 0) return;
+    Rectangle source = {0, 0, (float)asset->width, (float)asset->height};
+    float scale = fminf (box.width / asset->width, box.height / asset->height);
+    Rectangle dest = {
+        box.x + (box.width - asset->width * scale) / 2.0f,
+        box.y + (box.height - asset->height * scale) / 2.0f,
+        asset->width * scale, asset->height * scale};
+    DrawTexturePro (asset->tex, source, dest, (Vector2){0}, 0.0f, WHITE);
+    rlDrawRenderBatchActive ();
 }
+
 
 static void DrawDialogBase (const Ui *ui, Rectangle panel, const char *title) {
     DrawRectangle (0, 0, GetScreenWidth (), GetScreenHeight (), Fade (BLACK, 0.55f));
@@ -2096,7 +2018,7 @@ static void DrawPicker (const Ui *ui) {
             Asset *asset = EntityFind (assetIds.ids[i]);
             if (asset == NULL) continue;
 
-            DrawTextureFit (asset->tex,
+            DrawAssetFit (asset,
                             (Rectangle){list.x + 14.0f,
                                         rowY + (UI_ASSET_ROW_HEIGHT - 48.0f) / 2.0f,
                                         56.0f, 48.0f});
@@ -2168,7 +2090,7 @@ static void DrawManager (const Ui *ui) {
                 DrawRectangleRec (row, (Color){38, 42, 52, 255});
             }
 
-            DrawTextureFit (asset->tex, (Rectangle){list.x + 16.0f, rowY + 10.0f, 80.0f, 60.0f});
+            DrawAssetFit (asset, (Rectangle){list.x + 16.0f, rowY + 10.0f, 80.0f, 60.0f});
 
             DrawTextEx (ui->font, asset->name, (Vector2){list.x + 112.0f, rowY + 32.0f}, UI_FONT_SIZE, 0,
                         (Color){225, 228, 236, 255});
@@ -2241,7 +2163,7 @@ static void DrawObjectManager (const Ui *ui) {
             Rectangle thumb = {list.x + 16.0f, rowY + 10.0f, 80.0f, 60.0f};
             Asset *firstAsset = ObjectDisplayedAsset (object);
             if (firstAsset != NULL) {
-                DrawTextureFit (firstAsset->tex, thumb);
+                DrawAssetFit (firstAsset, thumb);
             } else {
                 DrawRectangleRec (thumb, (Color){20, 22, 28, 255});
                 DrawRectangleLinesEx (thumb, 1, (Color){60, 65, 80, 255});
@@ -2333,7 +2255,7 @@ static void DrawObjectAssets (const Ui *ui) {
             DrawTextEx (ui->font, TextFormat ("#%d", i), (Vector2){list.x + 16.0f, rowY + 24.0f}, UI_FONT_SIZE, 0,
                         indexColor);
 
-            DrawTextureFit (asset->tex, (Rectangle){list.x + 64.0f, rowY + 8.0f, 60.0f, 48.0f});
+            DrawAssetFit (asset, (Rectangle){list.x + 64.0f, rowY + 8.0f, 60.0f, 48.0f});
 
             Color nameColor = used ? (Color){110, 220, 135, 255}
                                    : (Color){225, 228, 236, 255};

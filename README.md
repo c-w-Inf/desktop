@@ -33,9 +33,8 @@
 
 ## 存档
 
-只有显式提供 `--save 文件` 时服务端才会存档：每 30 秒以及收到 `SIGINT` / `SIGTERM` /
-`SIGHUP` 退出时，把当前内容原子写入该文件。写入先落到 `.tmp` 文件，完成后重命名，避免
-中途失败留下半个存档。没有 `--save` 时服务端不写任何存档文件；只给 `--load` 时是只读导入。
+只有显式提供 `--save 文件` 时服务端才会存档：每 30 秒以及正常退出时，把当前内容原子写入
+该文件。写入先落到同目录唯一临时文件，`fsync` 后由 libuv 原子替换，避免中途失败留下半个存档。没有 `--save` 时服务端不写任何存档文件；只给 `--load` 时是只读导入。
 
 普通本地模式启动时不会自动导入；命令行 `--load 文件或目录` 会在启动时加载存档。
 `文件 → 导入`、`文件 → 导入文件夹` 和拖入 `.dsk` 或文件夹则是**增量导入**：不打开新窗口，直接把文件或目录中的全局环境、素材、
@@ -103,53 +102,92 @@ dsk/
 ```text
 image_canvas      编译出的二进制（不提交）
 src/              源代码
-obj/              中间目标文件（make 生成，不提交）
-assets/           UI 字体、脚本等宽字体及许可证
-.deps/usr/include raylib 头文件（提交）
-.deps/usr/lib     本地 raylib 动态库（不提交）
-Makefile
+assets/           字体许可证；字体由 CMake 查找或下载
+third_party/      tinyfiledialogs 等第三方源码
+build/            CMake 构建目录（不提交）
+.github/          GitHub Actions
+CMakeLists.txt
 README.md
 ```
 
 ## 仓库与依赖
 
-Git 跟踪源码、Makefile、README、`.gitignore`、raylib 头文件，以及
-`assets/WenQuanYiMicroHei.ttf`、`assets/WenQuanYiMicroHeiMono.ttf`、
-`assets/unifont.otf` 及字体许可证文件。以下内容不会提交：
+Git 跟踪源码、CMakeLists.txt、README、`.gitignore`、`.github/`、`assets/` 和
+`third_party/`。以下内容不会提交：
 
-- `image_canvas`、`obj/`、`compile_commands.json`、`*.dsk`
-- `.deps/usr/lib` 和 `.deps/usr/share`
+- `image_canvas`、`build/`、`compile_commands.json`
+- `dsk/`、`*.dsk`、`*.dsk.tmp*`
+- 本地下载并构建的 `.local/`
 
-需要 json-c 0.19 或更高版本，以及 minizip 和 zlib（Arch：`sudo pacman -S json-c minizip zlib`）。
+依赖：
 
-恢复本地依赖：
+- raylib 6.x
+- json-c 0.19+
+- libuv
+- libzip
+- zlib
+- tinyfiledialogs（源码在 `third_party/tinyfiledialogs`）
+
+Linux（Arch）：
 
 ```bash
-# raylib（也可使用系统 raylib：make RAYLIB_DIR=/usr）
-mkdir -p .deps
-curl -LO https://geo.mirror.pkgbuild.com/extra/os/x86_64/raylib-6.2-1-x86_64.pkg.tar.zst
-tar --zstd -xf raylib-6.2-1-x86_64.pkg.tar.zst -C .deps
-
+sudo pacman -S cmake ninja raylib json-c libuv libzip zlib
 ```
 
-Arch 默认 raylib 包不含 JPEG 支持，需要 JPEG 时参考下文重新编译。
+Linux（Debian/Ubuntu）：
+
+```bash
+sudo apt install cmake ninja-build pkg-config git \
+  libjson-c-dev libuv1-dev libzip-dev \
+  libgl1-mesa-dev libglu1-mesa-dev libx11-dev libxrandr-dev \
+  libxi-dev libxcursor-dev libxinerama-dev libwayland-dev \
+  libxkbcommon-dev
+# Ubuntu 仓库没有 raylib 6.2，需要从源码构建；GitHub Actions 已包含该步骤
+```
+
+macOS（Homebrew）：
+
+```bash
+brew install cmake ninja pkg-config raylib json-c libuv libzip
+```
+
+Windows 使用 MSYS2 UCRT64，安装：
+
+```bash
+pacman -S mingw-w64-ucrt-x86_64-gcc mingw-w64-ucrt-x86_64-cmake \
+  mingw-w64-ucrt-x86_64-ninja mingw-w64-ucrt-x86_64-pkgconf \
+  mingw-w64-ucrt-x86_64-raylib mingw-w64-ucrt-x86_64-json-c \
+  mingw-w64-ucrt-x86_64-libuv mingw-w64-ucrt-x86_64-libzip \
+  mingw-w64-ucrt-x86_64-zlib
+```
+
+CMake 优先使用系统安装的 raylib；找不到时通过 CMake `FetchContent` 下载并构建
+raylib 6.2，不需要把 Linux 版 raylib 二进制放进仓库。
 
 ## 代码结构
 
 | 文件 | 职责 |
 | --- | --- |
-| `src/main.c` | 主循环：协调 UI 事件、文件拖放、物件拖动和相机 |
+| `src/client.c` | 客户端联机：连接、请求、增量应用 |
+| `src/client_ui.c` / `src/client.h` | 已连接后的客户端主循环：UI、拖放、锁定 pending、加载动画和渲染 |
+| `src/main.c` | 原生入口：参数、窗口、本地服务端、连接和客户端启动 |
+| `src/main_web.c` | Web 入口：URL 参数、浏览器连接和逐帧客户端循环 |
 | `src/utils.c` / `src/utils.h` | 公共 `u64`、`IdGroup`、`TextBuffer`、`StrDup` 和随机数工具 |
+| `src/cutils.c` / `src/cutils.h` | 跨平台文件对话框、目录判断和文件读取 |
 | `src/script.c` / `src/script.h` | 脚本解释器：现场解析、按 self 隔离的环境、函数支持参数并内置 `messagef`/`object`/`user`/`flip`/`size`/`assets`/`typeof`/`menu`/`rand`/`int`/`move`/`pos`/`locked`/`color`/`script`/`fork`/`untouch`/`hide`/`show`；运行时值使用 json-c，原生支持 `u64` |
-| `third_party/subprocess.h` | 第三方跨平台子进程库（sheredom/subprocess.h，MIT），用于启动本地服务端进程 |
+| `third_party/tinyfiledialogs.c` / `.h` | 跨平台原生文件/文件夹对话框（zlib licence） |
 | `src/entity.c` / `src/entity.h` | 哈希表：id → 对象指针，平均 O(1) 查找 |
 | `src/menu_array.c` / `src/menu_array.h` | 内部菜单名称/函数数组操作：全局、用户和物件菜单共用同一套增删与替换逻辑 |
 | `src/user.c` / `src/user.h` | 在线用户：用户 ID、名称、光标状态和颜色，支持查找、增删和遍历 |
 | `src/strmap.c` / `src/strmap.h` | 哈希字符串 → `void *` 索引，惰性构建按名称排序的遍历视图 |
-| `src/net.c` / `src/net.h` | TCP 联机：无头服务器、权威场景、增量操作、物件占用、在线光标和全量快照 |
+| `src/netutils.h` / `src/netutils.c` | 跨平台传输抽象：native libuv TCP，Web 端保留 TCP 监听 stub |
+| `src/control.c` / `src/control.h` | 本地 GUI 与服务端之间的 libuv 控制管道 |
+| `src/server.c` | 服务端：监听、权威场景、锁定、脚本、快照和增量广播 |
+| `src/net_common.h` | 客户端/服务端共享的协议常量、Buffer/Reader 和帧编码 |
+| `src/net.h` | 客户端与服务端公共接口 |
 | `src/assets.c` / `src/assets.h` | 素材库：name → id 有序索引；`Asset` 逐个 malloc 并由 entity 按 id 注册 |
 | `src/object.c` / `src/object.h` | 物件：name → id 有序索引；`Object` 逐个 malloc 并由 entity 按 id 注册，持有素材数组、层数、时间戳、位置、命中检测 |
-| `src/save.c` / `src/save.h` | 服务端存档与导入：把素材、物件、全局/物件环境和菜单写成 ZIP 结构的 `.dsk`，并支持显式导入；不保存用户私有数据 |
+| `src/save.c` / `src/save.h` | 服务端存档与导入：libzip 读写 `.dsk`，libuv 处理路径、目录和原子替换；不保存用户私有数据 |
 | `src/hjson.c` / `src/hjson.h` | 内部 HJSON 解析器：兼容标准 JSON，支持注释、无引号字段/字符串、可选逗号、根对象省略括号和多行字符串 |
 | `src/view.c` / `src/view.h` | 相机与渲染：缩放、平移、坐标转换、背景图案、按层数/时间戳排序绘制物件、选中阴影 shader |
 | `src/ui.c` / `src/ui.h` | UI：字体、菜单栏、连接对话框、文件对话框、素材/物件管理窗口、物件素材弹窗、重命名输入 |
@@ -195,7 +233,7 @@ UI 通过 `UiEvent` 把「导入素材」「新建/重命名/删除物件」「�
 
 顶栏的 `物件` 按钮直接打开物件管理窗口（没有下拉菜单）。每个物件显示缩略图（取当前显示素材；空物件显示「空」）和名称。
 
-先点击列表中的物件进行选择；双击物件行可以直接进入「管理」。窗口底部按钮为：
+先点击列表中的物件进行选择；选中后点击「管理」进入物件素材管理。窗口底部按钮为：
 
 - **重命名 / 管理 / 浮动 / 删除**（左侧，未选择时禁用）
 - **新建 / 确定**（右侧）
@@ -204,9 +242,9 @@ UI 通过 `UiEvent` 把「导入素材」「新建/重命名/删除物件」「�
 
 - **新建**：创建一个没有素材的物件，放在当前视图中央，并自动选中它。它不会渲染，也不能被点选或拖动；后续操作时再申请锁
 - **重命名**：修改选中物件名称；选中时已经持有该物件锁
-- **管理**：进入该物件的管理界面并申请占用锁；双击物件行也可以直接进入
+- **管理**：进入该物件的管理界面并申请占用锁
   - 点击选择一项后，可以 **上移 / 下移** 调整数组顺序；移动不会改变当前显示素材下标
-  - 双击素材，或选中后点击「使用」，切换物件当前显示的素材
+  - 选中素材后点击「使用」，切换物件当前显示的素材
   - **移除** 删除数组中的某一项
   - **添加** 打开素材选择窗口，把已有素材追加到数组末尾
 - **删除**：删除选中物件本身，不会删除素材库中的素材
@@ -256,7 +294,7 @@ UI 通过 `UiEvent` 把「导入素材」「新建/重命名/删除物件」「�
 
 ## 导入图片
 
-顶栏的 `导入` 按钮会直接打开系统文件对话框（使用 `zenity`，本机已安装）选择一张图片，
+顶栏的 `导入` 按钮会直接打开系统文件对话框（Linux 使用 zenity/kdialog，Windows 使用原生对话框）选择一张图片，
 图片只会加入素材库，导入成功后会自动打开素材管理窗口，不会直接出现在桌面上。
 之后通过 `物件` 新建物件，再在「管理」中加入该素材；或者直接把图片拖进窗口
 （会同时创建引用它的物件）。
@@ -363,7 +401,7 @@ UI 通过 `UiEvent` 把「导入素材」「新建/重命名/删除物件」「�
 - `fork("name")` 复制当前 self 物件的素材、位置、层、环境、菜单并返回新 ID，重名使用 `name#1` 等后缀
 - 物件局部变量 `ontouch` / `ondrag` / `dragged` / `touched` 可直接赋值（不需要先 `var`），只能赋值为 null 或一元函数；`ontouch(userid)` 在玩家锁定物件时调用；`ondrag(userid)` 在物件被拖动期间按客户端同步间隔持续调用，即使鼠标静止也会触发；`dragged(userid)` 在拖动结束时调用；`touched(userid)` 在用户手动释放锁或断开连接时调用
 - `touched` 在锁真正清除前执行，此时用户数据和物件环境仍然存在；`untouch()`、服务器拒绝锁定请求、删除物件和 `remove` 清理都不会触发
-- 断开连接时服务端先对用户持有的每个物件执行 `touched`，再广播用户离开并清除用户数据
+- 断开连接时服务端先对用户当前持有的物件执行 `touched`，再广播用户离开并清除用户数据
 - `untouch()` 立即释放当前 self 物件的锁，不会触发 `touched`
 - `canscript` 为 false 时，服务端拒绝该用户的脚本提交；客户端点击脚本按钮或提交脚本时显示红色提示，但菜单脚本和物件事件仍可由服务端执行
 - 脚本 `menu("名称", func)` 向 self 对应的物件或用户菜单追加一项；self=0 写入由 entity 管理的 global 菜单；第二个参数传函数值，例如 `menu("问候", greet)`，点击时执行该函数；`menu()` 清空菜单；非用户/物件 self 报错
@@ -389,7 +427,7 @@ UI 通过 `UiEvent` 把「导入素材」「新建/重命名/删除物件」「�
 - 拖动时约每 30ms 广播一次物件位置，松开时再发送最终位置
 - 单击画布物件、物件管理器行或右键物件时立即申请占用
 - 占用中的物件才能拖动；拖动时保持占用，松开不会释放
-- 双击已占用的物件进入管理界面；退出管理界面后继续保持选中和占用
+- 通过物件管理器的「管理」进入物件素材界面；退出管理界面后继续保持选中和占用
 - 点击空白处、切换物件、关闭管理器或用户退出时释放占用
 - 被占用的物件显示阴影高亮，右下角显示占用者用户名；其他用户点击/拖动会被拒绝，提示中会显示占用者用户名
 - 物件管理器中，其他用户占用的行显示灰色遮罩和占用者用户名，当前不可选择
@@ -410,27 +448,142 @@ UI 通过 `UiEvent` 把「导入素材」「新建/重命名/删除物件」「�
 - 服务器发现引用不一致时，会让相关客户端重新获取一次全量快照
 - 服务器把场景保存在内存中，重启后清空
 - 最多 16 个客户端，TCP 端口默认 7777
-- 当前实现使用 POSIX socket（Linux/macOS），没有鉴权，建议在可信局域网使用
+- 网络使用 libuv，Linux 和 Windows 共用同一套实现；没有鉴权，建议在可信局域网使用
 
 服务器运行在终端中，按 Ctrl+C 结束。
 
-## 构建运行
+## 跨平台编译客户端
+
+客户端和本地服务端在同一个可执行文件 `image_canvas` 中。编译后直接运行是本地客户端：
 
 ```bash
-make
 ./image_canvas
 ```
 
-依赖已解压在 `.deps/usr`。如果系统已安装 raylib：
+作为远程客户端运行：
 
 ```bash
-make RAYLIB_DIR=/usr
+./image_canvas <IP> <端口> <用户名>
 ```
+
+通用依赖：CMake 3.20+、Ninja、C11 编译器、raylib 6.x、json-c、libuv、libzip、zlib。CMake 优先使用系统 raylib，找不到时通过 `FetchContent` 构建 raylib 6.2。字体由 CMake 自动查找或下载，不提交到仓库。
+
+### Linux
+
+Arch：
+
+```bash
+sudo pacman -S cmake ninja pkg-config raylib json-c libuv libzip zlib
+```
+
+Debian/Ubuntu：
+
+```bash
+sudo apt update
+sudo apt install cmake ninja-build pkg-config git \
+  libjson-c-dev libuv1-dev libzip-dev \
+  libgl1-mesa-dev libglu1-mesa-dev libx11-dev libxrandr-dev \
+  libxi-dev libxcursor-dev libxinerama-dev libwayland-dev \
+  libxkbcommon-dev
+```
+
+如果发行版没有 raylib 6.x，先从源码安装：
+
+```bash
+git clone --depth 1 --branch 6.2 https://github.com/raysan5/raylib.git raylib-src
+cmake -S raylib-src -B raylib-build -G Ninja \
+  -DCMAKE_BUILD_TYPE=Release -DBUILD_EXAMPLES=OFF -DBUILD_SHARED_LIBS=ON
+cmake --build raylib-build
+sudo cmake --install raylib-build
+sudo ldconfig
+```
+
+编译客户端：
+
+```bash
+cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+cmake --build build -j
+./image_canvas
+```
+
+生成的客户端是源码根目录下的 `./image_canvas`。
+
+### macOS
+
+```bash
+brew install cmake ninja pkg-config raylib json-c libuv libzip
+cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+cmake --build build -j
+./image_canvas
+```
+
+如果 Homebrew 的 raylib 不在默认路径：
+
+```bash
+cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release \
+  -DCMAKE_PREFIX_PATH="$(brew --prefix)"
+```
+
+### Windows（MSYS2 UCRT64）
+
+在 **MSYS2 UCRT64** 终端安装依赖：
+
+```bash
+pacman -S mingw-w64-ucrt-x86_64-gcc mingw-w64-ucrt-x86_64-cmake \
+  mingw-w64-ucrt-x86_64-ninja mingw-w64-ucrt-x86_64-pkgconf \
+  mingw-w64-ucrt-x86_64-raylib mingw-w64-ucrt-x86_64-json-c \
+  mingw-w64-ucrt-x86_64-libuv mingw-w64-ucrt-x86_64-libzip \
+  mingw-w64-ucrt-x86_64-zlib
+```
+
+编译：
+
+```bash
+cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+cmake --build build -j
+./image_canvas.exe
+```
+
+生成 `image_canvas.exe`。在 MSYS2 外直接运行时，需要把 MSYS2 UCRT64 运行时 DLL 放到同一目录；GitHub Actions 的 Windows artifact 已自动打包这些 DLL。
+
+### Web 客户端（Emscripten）
+
+安装 emsdk 并进入环境后：
+
+```bash
+source /path/to/emsdk/emsdk_env.sh
+emcmake cmake -S . -B build-web -G Ninja -DCMAKE_BUILD_TYPE=Release
+cmake --build build-web -j
+```
+
+输出目录是 `build-web/web/`。浏览器不能直接打开 `file://`，需要 HTTP 服务：
+
+```bash
+python3 -m http.server 8080 --directory build-web/web
+```
+
+打开 `http://localhost:8080/`。可以通过 URL 参数指定服务端和用户名：
+
+```text
+http://localhost:8080/?server=ws://127.0.0.1:7777&name=web
+```
+
+不传 `server` 时使用代码中的默认 WSS 地址。Web 构建会把 `assets/` 字体预加载到 `.data` 文件，不能通过 `file://` 运行。
+
+### CI 构建产物
+
+GitHub Actions 的 `build` 工作流会构建 Linux、Windows、macOS 和 Web。可以在 Actions 运行记录下载：
+
+- Windows：`image-canvas-windows-x64`
+- Web：`image-canvas-web`
+
+Linux/macOS 的临时产物通常不包含全部系统动态库，建议本地按上述步骤编译。
+
 
 ## 关于 JPEG
 
 raylib 6.2 默认关闭 JPEG（和 TGA）解码，所以 Arch 官方包无法用 `LoadImage` 读取 `.jpg`。
-本项目 `.deps/usr` 里的 libraylib 已经用 JPEG 支持重新编译过：
+通过 `FetchContent` 或系统包构建 raylib 时，如需 JPEG 支持可显式打开：
 
 ```bash
 cmake -S raylib-6.2 -B build \
@@ -443,9 +596,18 @@ cmake --build build -j
 
 ## 关于字体
 
-- 界面使用 `assets/WenQuanYiMicroHei.ttf`（WenQuanYi Micro Hei，24px）；
-- 脚本代码和 `self` 表达式使用 `assets/WenQuanYiMicroHeiMono.ttf`（WenQuanYi Micro Hei Mono，22px）；
-- 两种字体都包含常用中文、英文和符号，覆盖 UI 文案及运行时名称。
+字体文件不提交到仓库。CMake 配置时优先在系统字体目录中查找可用的中文 TTF/OTF：
+WenQuanYi、Noto Sans CJK 等；找不到时下载 Noto Sans CJK 和 Unifont 到构建目录，
+并在构建后复制为：
+
+```text
+assets/WenQuanYiMicroHei.ttf
+assets/WenQuanYiMicroHeiMono.ttf
+assets/unifont.otf
+```
+
+界面使用第一项，脚本代码和 `self` 表达式使用第二项，加载失败时回退到 Unifont。
+这些生成文件被 `.gitignore` 忽略。
 
 程序启动时按常用 Unicode 范围生成字符集，而不是每次扫描文案；素材名、物件名、
 用户名和运行时的中文提示都可以直接显示。
@@ -453,7 +615,7 @@ cmake --build build -j
 如果新字体加载失败，会回退到 `assets/unifont.otf`。
 
 字体许可：WenQuanYi Micro Hei 系列为 Apache License 2.0；Unifont 为 GPLv2+
-（含字体嵌入例外）/ SIL OFL 1.1 双许可。
+（含字体嵌入例外）/ SIL OFL 1.1 双许可；下载的 Noto CJK 为 SIL OFL 1.1。
 
 ## 操作
 

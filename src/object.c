@@ -217,8 +217,8 @@ Object *ObjectPick (Vector2 world) {
         Asset *asset = ObjectDisplayedAsset (object);
         if (asset == NULL) continue;
 
-        float left = object->pos.x - asset->tex.width / 2.0f;
-        float topEdge = object->pos.y - asset->tex.height / 2.0f;
+        float left = object->pos.x - asset->width / 2.0f;
+        float topEdge = object->pos.y - asset->height / 2.0f;
         int x = (int)floorf (world.x - left);
         int y = (int)floorf (world.y - topEdge);
 

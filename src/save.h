@@ -20,4 +20,7 @@ typedef u64 (*SaveIdAllocator) (void *context);
 bool SaveMerge (const char *path, ScriptEnv *globalEnv,
                 SaveIdAllocator allocId, void *context, TextBuffer *conflicts);
 
+/* 把文件夹压缩成 .dsk 字节；成功后 *data 由调用者 free。 */
+bool SavePackFolderData (const char *path, unsigned char **data, size_t *size);
+
 #endif

@@ -13,8 +13,9 @@ char *StrDup (const char *text);
 bool PathHasExtension (const char *path, const char *extension);
 /* 是否为本程序支持的图片文件。 */
 bool PathIsImage (const char *path);
-/* 是否为目录（跟随符号链接）。 */
-bool PathIsDirectory (const char *path);
+/* 安装 Ctrl+C / 终止信号处理器，仅设置停止标志。 */
+void UtilsInstallStopHandlers (void);
+bool UtilsStopRequested (void);
 
 u64 RandomNext (void);
 u64 RandomBounded (u64 limit);

@@ -78,7 +78,6 @@ typedef struct Ui {
     bool customFont;
     bool customMonoFont;
     bool showConnectMenu;
-    bool showFileMenu;
     int menuOpen;
     bool pickerOpen;
     float pickerScroll;
@@ -88,8 +87,6 @@ typedef struct Ui {
     bool objectManagerOpen;
     float objectScroll;
     Object *selectedObject;
-    Object *lastObjectClick;
-    double lastObjectClickTime;
     bool objectContextOpen;
     Object *contextObject;
     Vector2 contextPos;
@@ -99,8 +96,6 @@ typedef struct Ui {
     bool objectAssetsOpen;
     Object *assetsObject;
     int assetsObjectSelected;
-    int assetsLastClickIndex;
-    double assetsLastClickTime;
     float assetsObjectScroll;
     Object *pickerObject;
     bool renameOpen;
@@ -131,6 +126,7 @@ typedef struct Ui {
 } Ui;
 
 void UiInit (Ui *ui);
+void UiReloadFonts (Ui *ui);
 void UiUnload (Ui *ui);
 void UiShowMessage (Ui *ui, const char *message);
 void UiShowError (Ui *ui, const char *message);
@@ -138,7 +134,7 @@ void UiShowMessageText (const char *message);
 void UiShowMessageTextKind (const char *message, UiMessageKind kind);
 void UiOpenAssetManager (Ui *ui);
 void UiSetConnectMenuVisible (Ui *ui, bool visible);
-void UiSetFileMenuVisible (Ui *ui, bool visible);
+void UiSetLocalMode (Ui *ui, bool localMode);
 void UiOpenObjectManager (Ui *ui, Object *selectObject);
 void UiOpenObjectAssets (Ui *ui, Object *object);
 void UiSelectAsset (Ui *ui, Asset *asset);

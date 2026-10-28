@@ -13,6 +13,17 @@
 #define MAX_ZOOM 5.0f
 
 static const char *shadowVertexShader =
+#if defined(__EMSCRIPTEN__)
+    "attribute vec3 vertexPosition;\n"
+    "attribute vec2 vertexTexCoord;\n"
+    "uniform mat4 mvp;\n"
+    "varying vec2 fragTexCoord;\n"
+    "void main()\n"
+    "{\n"
+    "    fragTexCoord = vertexTexCoord;\n"
+    "    gl_Position = mvp*vec4(vertexPosition, 1.0);\n"
+    "}\n";
+#else
     "#version 330\n"
     "in vec3 vertexPosition;\n"
     "in vec2 vertexTexCoord;\n"
@@ -23,8 +34,21 @@ static const char *shadowVertexShader =
     "    fragTexCoord = vertexTexCoord;\n"
     "    gl_Position = mvp*vec4(vertexPosition, 1.0);\n"
     "}\n";
+#endif
 
 static const char *shadowFragmentShader =
+#if defined(__EMSCRIPTEN__)
+    "precision mediump float;\n"
+    "varying vec2 fragTexCoord;\n"
+    "uniform sampler2D texture0;\n"
+    "uniform vec4 shadowColor;\n"
+    "void main()\n"
+    "{\n"
+    "    float alpha = texture2D(texture0, fragTexCoord).a;\n"
+    "    float full = (alpha >= 1.0) ? 1.0 : 0.0;\n"
+    "    gl_FragColor = vec4(shadowColor.rgb, full*shadowColor.a);\n"
+    "}\n";
+#else
     "#version 330\n"
     "in vec2 fragTexCoord;\n"
     "uniform sampler2D texture0;\n"
@@ -36,6 +60,7 @@ static const char *shadowFragmentShader =
     "    float full = (alpha >= 1.0) ? 1.0 : 0.0;\n"
     "    finalColor = vec4(shadowColor.rgb, full*shadowColor.a);\n"
     "}\n";
+#endif
 
 void ViewInit (View *view) {
     // offset 固定在窗口中心，target 表示窗口中心对应的世界坐标
@@ -46,6 +71,8 @@ void ViewInit (View *view) {
 
     view->drawOrder = NULL;
     view->drawOrderCapacity = 0;
+    view->dragPreview = NULL;
+    view->dragPreviewPos = (Vector2){0};
 
     view->shadowShader = LoadShaderFromMemory (shadowVertexShader, shadowFragmentShader);
     if (view->shadowShader.id != 0) {
@@ -160,8 +187,12 @@ static void DrawBackground (const View *view) {
     }
 }
 
+static Vector2 ObjectDrawPos (const View *view, const Object *object) {
+    return object == view->dragPreview ? view->dragPreviewPos : object->pos;
+}
+
 static void DrawObjectShadow (const View *view, const Object *object) {
-    if (view->shadowShader.id == 0) return;
+    if (view->shadowShader.id == 0 || object->assets.count == 0) return;
 
     static const Vector2 offsets[] = {
         { 3.0f,  0.0f}, {-3.0f,  0.0f}, { 0.0f,  3.0f}, { 0.0f, -3.0f},
@@ -177,12 +208,14 @@ static void DrawObjectShadow (const View *view, const Object *object) {
     if (object->assets.count > 0) {
         const Asset *asset = ObjectDisplayedAsset (object);
         if (asset != NULL) {
+            Vector2 drawPos = ObjectDrawPos (view, object);
             Vector2 base = {
-                object->pos.x - asset->tex.width / 2.0f,
-                object->pos.y - asset->tex.height / 2.0f};
+                drawPos.x - asset->width / 2.0f,
+                drawPos.y - asset->height / 2.0f};
+            Rectangle source = {0, 0, (float)asset->width, (float)asset->height};
             for (int i = 0; i < offsetCount; i++) {
                 Vector2 position = Vector2Add (base, Vector2Scale (offsets[i], inverseZoom));
-                DrawTextureV (asset->tex, position, WHITE);
+                DrawTextureRec (asset->tex, source, position, WHITE);
             }
         }
     }
@@ -198,9 +231,10 @@ static void DrawObjectLockLabel (const View *view, const Object *object, Font fo
     const User *owner = UserFind (object->lockOwnerId);
     if (asset == NULL || owner == NULL) return;
 
+    Vector2 drawPos = ObjectDrawPos (view, object);
     Vector2 corner = GetWorldToScreen2D (
-        (Vector2){object->pos.x + asset->tex.width / 2.0f,
-                  object->pos.y + asset->tex.height / 2.0f}, view->cam);
+        (Vector2){drawPos.x + asset->width / 2.0f,
+                  drawPos.y + asset->height / 2.0f}, view->cam);
 
     // 标签属于物件绘制顺序的一部分，后续物件可以遮挡它。
     EndMode2D ();
@@ -214,6 +248,15 @@ static int CompareObjectsForDraw (const void *a, const void *b) {
     const Object *objectA = *(const Object *const *)a;
     const Object *objectB = *(const Object *const *)b;
     return ObjectCompareDrawOrder (objectA, objectB);
+}
+
+void ViewSetDragPreview (View *view, const Object *object, Vector2 position) {
+    view->dragPreview = object;
+    view->dragPreviewPos = position;
+}
+
+void ViewClearDragPreview (View *view) {
+    view->dragPreview = NULL;
 }
 
 void ViewDraw (View *view, const Object *chosen, Font font) {
@@ -251,10 +294,12 @@ void ViewDraw (View *view, const Object *chosen, Font font) {
         if (object->assets.count > 0) {
             const Asset *asset = ObjectDisplayedAsset (object);
             if (asset != NULL) {
+                Vector2 drawPos = ObjectDrawPos (view, object);
                 Vector2 position = {
-                    object->pos.x - asset->tex.width / 2.0f,
-                    object->pos.y - asset->tex.height / 2.0f};
-                DrawTextureV (asset->tex, position, WHITE);
+                    drawPos.x - asset->width / 2.0f,
+                    drawPos.y - asset->height / 2.0f};
+                Rectangle source = {0, 0, (float)asset->width, (float)asset->height};
+                DrawTextureRec (asset->tex, source, position, WHITE);
             }
         }
         DrawObjectLockLabel (view, object, font);

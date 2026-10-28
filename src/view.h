@@ -11,6 +11,8 @@ typedef struct View {
     Shader shadowShader;
     Object **drawOrder;
     int drawOrderCapacity;
+    const Object *dragPreview;
+    Vector2 dragPreviewPos;
 } View;
 
 void ViewInit (View *view);
@@ -22,6 +24,8 @@ void ViewSetZoom (View *view, float zoom);
 void ViewZoomAt (View *view, Vector2 screenPoint, float wheel);
 void ViewPan (View *view, Vector2 mouseDelta);
 Vector2 ViewScreenToWorld (const View *view, Vector2 screenPoint);
+void ViewSetDragPreview (View *view, const Object *object, Vector2 position);
+void ViewClearDragPreview (View *view);
 void ViewDraw (View *view, const Object *chosen, Font font);
 
 #endif

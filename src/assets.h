@@ -8,6 +8,8 @@
 
 typedef struct Asset {
     Texture2D tex;
+    int width;
+    int height;
     u64 id;
     char name[256];
     unsigned char* alpha;     // 每个像素的 a 通道

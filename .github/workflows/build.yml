@@ -1,0 +1,203 @@
+name: build
+
+on:
+  push:
+    branches: [master, dev]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake ninja-build pkg-config git \
+            libjson-c-dev libuv1-dev libzip-dev \
+            libgl1-mesa-dev libglu1-mesa-dev libx11-dev libxrandr-dev libxi-dev \
+            libxcursor-dev libxinerama-dev libwayland-dev libxkbcommon-dev
+      - name: Build raylib
+        run: |
+          git clone --depth 1 --branch 6.2 https://github.com/raysan5/raylib.git raylib-src
+          cmake -S raylib-src -B raylib-build -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release -DBUILD_EXAMPLES=OFF \
+            -DBUILD_SHARED_LIBS=ON
+          cmake --build raylib-build
+          sudo cmake --install raylib-build
+          sudo ldconfig
+      - name: Configure
+        run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+      - name: Build
+        run: cmake --build build
+      - name: Server smoke test
+        run: |
+          ./image_canvas --server --port 7888 --save ci.dsk > server.log 2>&1 &
+          pid=$!
+          for i in $(seq 1 30); do
+            grep -q "listening" server.log && break
+            sleep 0.2
+          done
+          cat server.log
+          python3 - <<'PY'
+          import socket, struct, time
+          s = socket.create_connection(("127.0.0.1", 7888), 3)
+          name = b"ci"
+          payload = struct.pack("<H", len(name)) + name
+          s.sendall(struct.pack("<I", len(payload) + 1) + bytes([8]) + payload)
+          s.settimeout(3)
+          data = s.recv(4)
+          assert len(data) == 4
+          size = struct.unpack("<I", data)[0]
+          frame = b""
+          while len(frame) < size:
+              frame += s.recv(size - len(frame))
+          assert frame[0] == 1, frame[0]
+          s.close()
+          print("snapshot ok")
+          PY
+          kill -TERM "$pid" 2>/dev/null || true
+          wait "$pid" 2>/dev/null || true
+          test -s ci.dsk
+          ./image_canvas --server --port 7890 --load ci.dsk > load.log 2>&1 &
+          pid=$!
+          for i in $(seq 1 30); do
+            grep -q "listening" load.log && break
+            sleep 0.2
+          done
+          cat load.log
+          grep -q "listening" load.log
+          kill -TERM "$pid" 2>/dev/null || true
+          wait "$pid" 2>/dev/null || true
+
+  windows:
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: msys2 {0}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: msys2/setup-msys2@v2
+        with:
+          msystem: UCRT64
+          update: true
+          install: >-
+            mingw-w64-ucrt-x86_64-gcc
+            mingw-w64-ucrt-x86_64-cmake
+            mingw-w64-ucrt-x86_64-ninja
+            mingw-w64-ucrt-x86_64-pkgconf
+            mingw-w64-ucrt-x86_64-raylib
+            mingw-w64-ucrt-x86_64-json-c
+            mingw-w64-ucrt-x86_64-libzip
+            mingw-w64-ucrt-x86_64-libuv
+            mingw-w64-ucrt-x86_64-zlib
+      - name: Configure
+        run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+      - name: Build
+        run: cmake --build build
+      - name: Server smoke test
+        run: |
+          ./image_canvas.exe --server --port 7888 > server.log 2>&1 &
+          pid=$!
+          ok=0
+          for i in $(seq 1 30); do
+            if grep -q "listening" server.log; then ok=1; break; fi
+            sleep 0.2
+          done
+          cat server.log
+          kill "$pid" 2>/dev/null || true
+          taskkill.exe //F //IM image_canvas.exe >/dev/null 2>&1 || true
+          test "$ok" = 1
+      - name: Save startup smoke test
+        run: |
+          ./image_canvas.exe --server --port 7889 --save ci.dsk > save.log 2>&1 &
+          spid=$!
+          for i in $(seq 1 30); do
+            grep -q "listening" save.log && break
+            sleep 0.2
+          done
+          cat save.log
+          grep -q "listening" save.log
+          kill "$spid" 2>/dev/null || true
+          taskkill.exe //F //IM image_canvas.exe >/dev/null 2>&1 || true
+      - name: Package
+        run: |
+          mkdir dist
+          cp image_canvas.exe dist/
+          cp -r assets dist/
+          ldd image_canvas.exe | awk '/=> \/ucrt64\// {print $3}' | while read -r dll; do
+            cp "$dll" dist/
+          done
+          cp /ucrt64/bin/libgcc_s_seh-1.dll dist/ 2>/dev/null || true
+      - uses: actions/upload-artifact@v4
+        with:
+          name: image-canvas-windows-x64
+          path: dist/
+
+  macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install dependencies
+        run: brew install cmake ninja pkg-config raylib json-c libuv libzip
+      - name: Configure
+        run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+      - name: Build
+        run: cmake --build build
+      - name: Server and save smoke test
+        run: |
+          ./image_canvas --server --port 7891 --save ci.dsk > server.log 2>&1 &
+          pid=$!
+          for i in $(seq 1 30); do
+            grep -q "listening" server.log && break
+            sleep 0.2
+          done
+          cat server.log
+          python3 - <<'PY'
+          import socket, struct
+          s = socket.create_connection(("127.0.0.1", 7891), 3)
+          name = b"ci"
+          payload = struct.pack("<H", len(name)) + name
+          s.sendall(struct.pack("<I", len(payload) + 1) + bytes([8]) + payload)
+          s.settimeout(3)
+          data = s.recv(4)
+          assert len(data) == 4
+          size = struct.unpack("<I", data)[0]
+          frame = b""
+          while len(frame) < size:
+              frame += s.recv(size - len(frame))
+          assert frame[0] == 1, frame[0]
+          s.close()
+          print("snapshot ok")
+          PY
+          kill -TERM "$pid" 2>/dev/null || true
+          wait "$pid" 2>/dev/null || true
+          test -s ci.dsk
+          ./image_canvas --server --port 7892 --load ci.dsk > load.log 2>&1 &
+          pid=$!
+          for i in $(seq 1 30); do
+            grep -q "listening" load.log && break
+            sleep 0.2
+          done
+          cat load.log
+          grep -q "listening" load.log
+          kill -TERM "$pid" 2>/dev/null || true
+          wait "$pid" 2>/dev/null || true
+
+  web:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: mymindstorm/setup-emsdk@v14
+        with:
+          version: 3.1.64
+      - name: Configure
+        run: emcmake cmake -S . -B build-web -G Ninja -DCMAKE_BUILD_TYPE=Release
+      - name: Build
+        run: cmake --build build-web
+      - name: Upload web artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: image-canvas-web
+          path: build-web/web

@@ -6,12 +6,14 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
-#include <unistd.h>
 
 #include "entity.h"
 #include "strmap.h"
 
 static StrMap* assetNames;
+#define MAX_PENDING_ASSETS 1024
+static Asset* pendingAssets[MAX_PENDING_ASSETS];
+static int pendingAssetCount;
 
 static unsigned char* LoadImageAlpha (Image image) {
     Color* colors = LoadImageColors (image);
@@ -35,9 +37,20 @@ static void DestroyAsset (Asset* asset) {
     free (asset);
 }
 
+static void PadImageEdges (Image *image, int width, int height) {
+    for (int y = 0; y < height; y++) {
+        Color edge = GetImageColor (*image, width - 1, y);
+        for (int x = width; x < image->width; x++) ImageDrawPixel (image, x, y, edge);
+    }
+    for (int y = height; y < image->height; y++) {
+        for (int x = 0; x < image->width; x++)
+            ImageDrawPixel (image, x, y, GetImageColor (*image, x, height - 1));
+    }
+}
+
 static Asset* CreateAssetFromImage (
-    Image image, u64 id, const char* name, const char* ext, const unsigned char* fileData,
-    int fileSize) {
+    Image image, int width, int height, u64 id, const char* name, const char* ext,
+    const unsigned char* fileData, int fileSize) {
     unsigned char* alpha = LoadImageAlpha (image);
     if (alpha == NULL) return NULL;
 
@@ -55,6 +68,8 @@ static Asset* CreateAssetFromImage (
     }
 
     asset->tex = tex;
+    asset->width = width;
+    asset->height = height;
     asset->id = id;
     asset->alpha = alpha;
     snprintf (asset->name, sizeof (asset->name), "%s", name);
@@ -141,7 +156,17 @@ Asset* AssetAdd (
         return NULL;
     }
 
-    Asset* asset = CreateAssetFromImage (img, id, name, ext, data, size);
+    int width = img.width;
+    int height = img.height;
+    int potW = 1, potH = 1;
+    while (potW < img.width) potW <<= 1;
+    while (potH < img.height) potH <<= 1;
+    if (potW != img.width || potH != img.height) {
+        ImageResizeCanvas (&img, potW, potH, 0, 0, BLANK);
+        PadImageEdges (&img, width, height);
+    }
+
+    Asset* asset = CreateAssetFromImage (img, width, height, id, name, ext, data, size);
     UnloadImage (img);
     if (asset == NULL) return NULL;
 
@@ -149,6 +174,7 @@ Asset* AssetAdd (
         DestroyAsset (asset);
         return NULL;
     }
+    fflush (stdout);
     return asset;
 }
 
@@ -224,7 +250,16 @@ bool AssetReplace (Asset* asset, const char* ext, const unsigned char* data, int
         return false;
     }
 
+    int width = img.width;
+    int height = img.height;
     unsigned char* alpha = LoadImageAlpha (img);
+    int potW = 1, potH = 1;
+    while (potW < width) potW <<= 1;
+    while (potH < height) potH <<= 1;
+    if (potW != width || potH != height) {
+        ImageResizeCanvas (&img, potW, potH, 0, 0, BLANK);
+        PadImageEdges (&img, width, height);
+    }
     Texture2D tex = LoadTextureFromImage (img);
     UnloadImage (img);
 
@@ -242,6 +277,8 @@ bool AssetReplace (Asset* asset, const char* ext, const unsigned char* data, int
     free (asset->fileData);
 
     asset->tex = tex;
+    asset->width = width;
+    asset->height = height;
     asset->alpha = alpha;
     asset->fileData = fileData;
     asset->fileSize = size;
@@ -252,20 +289,27 @@ bool AssetReplace (Asset* asset, const char* ext, const unsigned char* data, int
 bool AssetDelete (Asset* asset) {
     if (asset == NULL || EntityFind (asset->id) != asset) return false;
 
+    fflush (stdout);
     StrMapRemove (assetNames, asset->name);
     EntityUnregister (asset->id);
-    DestroyAsset (asset);
+    if (pendingAssetCount < MAX_PENDING_ASSETS)
+        pendingAssets[pendingAssetCount++] = asset;
+    else
+        DestroyAsset (asset);
     return true;
 }
 
 bool AssetIsOpaqueAt (const Asset* asset, int x, int y) {
     if (asset == NULL || asset->alpha == NULL) return false;
-    if (x < 0 || y < 0 || x >= asset->tex.width || y >= asset->tex.height) return false;
+    if (x < 0 || y < 0 || x >= asset->width || y >= asset->height) return false;
 
     return (asset->alpha[(size_t)y * (size_t)asset->tex.width + (size_t)x] == 255);
 }
 
 void AssetUnload (void) {
+    for (int i = 0; i < pendingAssetCount; i++)
+        DestroyAsset (pendingAssets[i]);
+    pendingAssetCount = 0;
     int count = StrMapCount (assetNames);
     for (int i = 0; i < count; i++) {
         Asset *asset = NULL;
